@@ -165,9 +165,15 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 								FunctionCall: &genai.FunctionCall{
 									Name: toolconfirmation.FunctionCallName,
 									Args: map[string]any{
-										"originalFunctionCall": confirmingFunctionCall,
-										"toolConfirmation": toolconfirmation.ToolConfirmation{
-											Hint: "Are you sure?",
+										"originalFunctionCall": map[string]any{
+											"id":   "call_1",
+											"name": "test_tool",
+											"args": map[string]any{"arg": "val"},
+										},
+										"toolConfirmation": map[string]any{
+											"hint":      "Are you sure?",
+											"confirmed": false,
+											"payload":   nil,
 										},
 									},
 								},
@@ -181,7 +187,10 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+			got, err := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+			if err != nil {
+				t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+			}
 
 			if diff := cmp.Diff(tt.wantEvent, got,
 				cmpopts.IgnoreFields(session.Event{}, "Timestamp", "LongRunningToolIDs", "ID"),
@@ -246,7 +255,10 @@ func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil event")
 	}
@@ -290,7 +302,10 @@ func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T)
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+	}
 	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
 		t.Fatalf("expected one confirmation part, got %#v", got)
 	}
@@ -366,11 +381,15 @@ func TestGenerateRequestConfirmationEventResponseOrder(t *testing.T) {
 			if got, want := part.FunctionCall.Name, toolconfirmation.FunctionCallName; got != want {
 				t.Fatalf("part %d FunctionCall.Name = %q, want %q", i, got, want)
 			}
-			orig, ok := part.FunctionCall.Args["originalFunctionCall"].(*genai.FunctionCall)
+			orig, ok := part.FunctionCall.Args["originalFunctionCall"].(map[string]any)
 			if !ok {
 				t.Fatalf("part %d missing originalFunctionCall arg, got %#v", i, part.FunctionCall.Args["originalFunctionCall"])
 			}
-			ids = append(ids, orig.ID)
+			id, ok := orig["id"].(string)
+			if !ok {
+				t.Fatalf("part %d originalFunctionCall missing string id, got %#v", i, orig["id"])
+			}
+			ids = append(ids, id)
 
 			// LongRunningToolIDs must be the generated request-confirmation
 			// call ID at the same index (parallel slices).
@@ -381,7 +400,10 @@ func TestGenerateRequestConfirmationEventResponseOrder(t *testing.T) {
 		return ids
 	}
 
-	first := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	first, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+	}
 	gotOrder := orderOf(t, first)
 	if diff := cmp.Diff(responseOrder, gotOrder); diff != "" {
 		t.Errorf("parts not in model-response order (-want +got):\n%s", diff)
@@ -389,7 +411,10 @@ func TestGenerateRequestConfirmationEventResponseOrder(t *testing.T) {
 
 	// Repeated calls must produce an identical ordering.
 	for i := 0; i < 10; i++ {
-		next := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+		next, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+		if err != nil {
+			t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+		}
 		if diff := cmp.Diff(gotOrder, orderOf(t, next)); diff != "" {
 			t.Errorf("ordering not stable on call %d (-first +next):\n%s", i, diff)
 		}
@@ -424,7 +449,10 @@ func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+	}
 	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
 		t.Fatalf("expected one confirmation part, got %#v", got)
 	}
