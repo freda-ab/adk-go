@@ -203,6 +203,110 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	}
 }
 
+// TestGenerateRequestConfirmationEventPreservesThoughtSignature verifies that
+// ThoughtSignature from the original function call Part is carried over to the
+// adk_request_confirmation Part. Gemini thinking models require every model-role
+// function call Part to include a thought_signature — without it the API returns
+// INVALID_ARGUMENT.
+func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T) {
+	sig := []byte("opaque-thought-signature")
+
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+		branch:       "main",
+	}
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+							Args: map[string]any{"arg": "val"},
+						},
+						ThoughtSignature: sig,
+					},
+				},
+			},
+		},
+	}
+
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "confirm?"},
+			},
+		},
+	}
+
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if len(got.Content.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(got.Content.Parts))
+	}
+
+	part := got.Content.Parts[0]
+	if part.FunctionCall == nil || part.FunctionCall.Name != toolconfirmation.FunctionCallName {
+		t.Fatal("expected adk_request_confirmation function call")
+	}
+	if string(part.ThoughtSignature) != string(sig) {
+		t.Errorf("ThoughtSignature not preserved: got %q, want %q", part.ThoughtSignature, sig)
+	}
+}
+
+// TestGenerateRequestConfirmationEventNoThoughtSignature verifies the function
+// works normally when the original Part has no ThoughtSignature.
+func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+	}
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "confirm?"},
+			},
+		},
+	}
+
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil event")
+	}
+
+	part := got.Content.Parts[0]
+	if len(part.ThoughtSignature) != 0 {
+		t.Errorf("expected no ThoughtSignature, got %q", part.ThoughtSignature)
+	}
+}
+
 // TestGenerateRequestConfirmationEventHasID verifies that the event returned
 // by generateRequestConfirmationEvent always has a non-empty ID.
 //

@@ -46,19 +46,32 @@ func generateRequestConfirmationEvent(
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
-		functionCalls[call.ID] = call
+
+	// Index the original Parts by function call ID so we can carry over
+	// ThoughtSignature. Gemini thinking models require every model-role
+	// function call Part to include its thought signature; without it the
+	// API returns INVALID_ARGUMENT.
+	type originalCall struct {
+		call             *genai.FunctionCall
+		thoughtSignature []byte
+	}
+	originals := make(map[string]originalCall, len(functionCallEvent.Content.Parts))
+	for _, p := range functionCallEvent.Content.Parts {
+		if p.FunctionCall != nil {
+			originals[p.FunctionCall.ID] = originalCall{
+				call:             p.FunctionCall,
+				thoughtSignature: p.ThoughtSignature,
+			}
+		}
 	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalFunctionCall, ok := functionCalls[funcID]
-		if !ok || originalFunctionCall == nil {
+		orig, ok := originals[funcID]
+		if !ok || orig.call == nil {
 			continue
 		}
 
-		// Prepare arguments for the adk_request_confirmation call
-		originalCallMap, err := converters.ToMapStructure(originalFunctionCall)
+		originalCallMap, err := converters.ToMapStructure(orig.call)
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize original function call: %w", err)
 		}
@@ -78,7 +91,8 @@ func generateRequestConfirmationEvent(
 		}
 
 		parts = append(parts, &genai.Part{
-			FunctionCall: requestConfirmationFC,
+			FunctionCall:     requestConfirmationFC,
+			ThoughtSignature: orig.thoughtSignature,
 		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
