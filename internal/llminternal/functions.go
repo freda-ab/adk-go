@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"fmt"
+	"log/slog"
 
 	"google.golang.org/genai"
 
@@ -88,6 +89,11 @@ func generateRequestConfirmationEvent(
 			ID:   utils.GenerateFunctionCallID(),
 			Name: toolconfirmation.FunctionCallName,
 			Args: args,
+		}
+
+		if len(orig.thoughtSignature) > 0 {
+			slog.Warn("adk_request_confirmation: copying ThoughtSignature from original function call to confirmation Part",
+				"funcName", orig.call.Name, "funcID", funcID)
 		}
 
 		parts = append(parts, &genai.Part{
