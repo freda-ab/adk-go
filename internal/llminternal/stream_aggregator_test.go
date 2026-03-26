@@ -887,3 +887,237 @@ func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 		t.Errorf("ErrorMessage was unexpectedly overwritten to '%s'", finalResponse.ErrorMessage)
 	}
 }
+
+// TestParallelFunctionCallsThoughtSignaturePropagation verifies that when the
+// model streams parallel function calls where only the first part carries a
+// thought_signature, Close() propagates that signature to all subsequent
+// function call parts so the API accepts the history on the next turn.
+func TestParallelFunctionCallsThoughtSignaturePropagation(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	sharedSig := []byte("shared_thought_signature")
+
+	// Chunk 1: first parallel call — carries the thought signature.
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall:     &genai.FunctionCall{Name: "sum", ID: "fc_001", Args: map[string]any{"a": 2.0, "b": 3.0}},
+							ThoughtSignature: sharedSig,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Chunk 2: second parallel call — no thought signature (API behaviour).
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_002", Args: map[string]any{"a": 4.0, "b": 5.0}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Chunk 3: third parallel call — no thought signature.
+	chunk3 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_003", Args: map[string]any{"a": 6.0, "b": 7.0}},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2, chunk3} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	for i, p := range parts {
+		if p.FunctionCall == nil {
+			t.Errorf("parts[%d]: expected function call", i)
+			continue
+		}
+		if string(p.ThoughtSignature) != string(sharedSig) {
+			t.Errorf("parts[%d]: expected thought signature %q, got %q", i, sharedSig, p.ThoughtSignature)
+		}
+	}
+}
+
+// TestParallelFunctionCallsThoughtSignaturePropagation_TextAndFunctionCalls verifies
+// that text parts streamed before parallel function calls are left untouched
+// (no signature added) while all function call parts still receive the signature.
+func TestParallelFunctionCallsThoughtSignaturePropagation_TextAndFunctionCalls(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	sharedSig := []byte("shared_thought_signature")
+
+	// Chunk 1: text preamble — no thought signature.
+	chunkText := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Calculating the sums:"}},
+				},
+			},
+		},
+	}
+
+	// Chunk 2: first parallel call — carries the thought signature.
+	chunkFC1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall:     &genai.FunctionCall{Name: "sum", ID: "fc_001", Args: map[string]any{"a": 2.0, "b": 3.0}},
+							ThoughtSignature: sharedSig,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Chunk 3: second parallel call — no thought signature.
+	chunkFC2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_002", Args: map[string]any{"a": 4.0, "b": 5.0}}},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunkText, chunkFC1, chunkFC2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts (1 text + 2 function calls), got %d", len(parts))
+	}
+
+	// Text part must not receive a thought signature.
+	if parts[0].FunctionCall != nil {
+		t.Errorf("parts[0]: expected text part, got function call")
+	}
+	if len(parts[0].ThoughtSignature) != 0 {
+		t.Errorf("parts[0] (text): expected empty thought signature, got %q", parts[0].ThoughtSignature)
+	}
+
+	// Both function call parts must carry the shared signature.
+	for i := 1; i <= 2; i++ {
+		p := parts[i]
+		if p.FunctionCall == nil {
+			t.Errorf("parts[%d]: expected function call", i)
+			continue
+		}
+		if string(p.ThoughtSignature) != string(sharedSig) {
+			t.Errorf("parts[%d]: expected thought signature %q, got %q", i, sharedSig, p.ThoughtSignature)
+		}
+	}
+}
+
+// TestParallelFunctionCallsThoughtSignaturePropagation_AllHaveDistinctSignatures
+// verifies that when every function call already carries its own signature,
+// the propagation pass leaves them all untouched (no overwriting).
+func TestParallelFunctionCallsThoughtSignaturePropagation_AllHaveDistinctSignatures(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	sig1 := []byte("signature_for_call_one")
+	sig2 := []byte("signature_for_call_two")
+	sig3 := []byte("signature_for_call_three")
+
+	chunks := []*genai.GenerateContentResponse{
+		{Candidates: []*genai.Candidate{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_001", Args: map[string]any{"a": 1.0}}, ThoughtSignature: sig1},
+		}}}}},
+		{Candidates: []*genai.Candidate{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_002", Args: map[string]any{"a": 2.0}}, ThoughtSignature: sig2},
+		}}}}},
+		{Candidates: []*genai.Candidate{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "sum", ID: "fc_003", Args: map[string]any{"a": 3.0}}, ThoughtSignature: sig3},
+		}}, FinishReason: genai.FinishReasonStop}}},
+	}
+
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	expected := [][]byte{sig1, sig2, sig3}
+	for i, p := range parts {
+		if p.FunctionCall == nil {
+			t.Errorf("parts[%d]: expected function call", i)
+			continue
+		}
+		if string(p.ThoughtSignature) != string(expected[i]) {
+			t.Errorf("parts[%d]: thought signature was overwritten — got %q, want %q", i, p.ThoughtSignature, expected[i])
+		}
+	}
+}
