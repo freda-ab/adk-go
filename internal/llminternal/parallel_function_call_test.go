@@ -15,7 +15,13 @@
 package llminternal_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,9 +29,14 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -40,6 +51,96 @@ type SumResult struct {
 
 func sumFunc(ctx tool.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
+}
+
+// parallelThoughtSignatureTransport validates that replayed model-role
+// function call parts all carry thought signatures, then normalizes the request
+// back to the recorded fixture shape where only the first parallel call keeps
+// the signature. This lets the test keep using the existing httprr data.
+type parallelThoughtSignatureTransport struct {
+	base http.RoundTripper
+}
+
+func (t *parallelThoughtSignatureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body == nil {
+		return t.base.RoundTrip(req)
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.Body.Close()
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		return t.base.RoundTrip(req)
+	}
+
+	if err := validateAndNormalizeParallelThoughtSignatures(payload); err != nil {
+		return nil, err
+	}
+
+	normalizedBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(normalizedBody))
+	req.ContentLength = int64(len(normalizedBody))
+	req.Header.Set("Content-Length", strconv.Itoa(len(normalizedBody)))
+
+	return t.base.RoundTrip(req)
+}
+
+func validateAndNormalizeParallelThoughtSignatures(payload map[string]any) error {
+	contents, ok := payload["contents"].([]any)
+	if !ok {
+		return nil
+	}
+
+	for contentIndex, rawContent := range contents {
+		content, ok := rawContent.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := content["role"].(string)
+		if role != "model" {
+			continue
+		}
+
+		parts, ok := content["parts"].([]any)
+		if !ok {
+			continue
+		}
+
+		firstFunctionCall := true
+		for partIndex, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := part["functionCall"]; !ok {
+				continue
+			}
+
+			signature, _ := part["thoughtSignature"].(string)
+			if signature == "" {
+				return fmt.Errorf("content[%d].parts[%d]: expected non-empty thought signature for function call", contentIndex, partIndex)
+			}
+
+			if firstFunctionCall {
+				firstFunctionCall = false
+				continue
+			}
+
+			delete(part, "thoughtSignature")
+		}
+	}
+
+	return nil
 }
 
 var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
@@ -343,18 +444,35 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 
 func TestParallelFunctionCalls(t *testing.T) {
 	tests := []struct {
-		name      string
-		modelName string
-		want      *model.LLMResponse
+		name            string
+		modelName       string
+		wantLLMResponse []*model.LLMResponse
 	}{
-		{"gemini-2.5-flash", "gemini-2.5-flash", expectedNonPartialLLMResponse25Flash[0]},
-		{"gemini-3-flash-preview", "gemini-3-flash-preview", expectedNonPartialLLMResponse3FlashPreview[0]},
-		{"gemini-3.1-pro-preview", "gemini-3.1-pro-preview", expectedNonPartialLLMResponse3ProPreview[0]},
+		{"gemini-2.5-flash", "gemini-2.5-flash", expectedNonPartialLLMResponse25Flash},
+		{"gemini-3-flash-preview", "gemini-3-flash-preview", expectedNonPartialLLMResponse3FlashPreview},
+		{"gemini-3.1-pro-preview", "gemini-3.1-pro-preview", expectedNonPartialLLMResponse3ProPreview},
 	}
 	for _, tt := range tests {
 		t.Run("test_parallel_function_calls_"+tt.name, func(t *testing.T) {
 			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
-			geminiModel, err := gemini.NewModel(t.Context(), tt.modelName, testutil.NewGeminiTestClientConfig(t, httpRecordFilename))
+
+			baseTransport, err := testutil.NewGeminiTransport(httpRecordFilename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseTransport = &parallelThoughtSignatureTransport{base: baseTransport}
+
+			apiKey := ""
+			if recording, _ := httprr.Recording(httpRecordFilename); !recording {
+				apiKey = "fakekey"
+			}
+
+			cfg := &genai.ClientConfig{
+				HTTPClient: &http.Client{Transport: baseTransport},
+				APIKey:     apiKey,
+			}
+
+			geminiModel, err := gemini.NewModel(t.Context(), tt.modelName, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -366,80 +484,127 @@ func TestParallelFunctionCalls(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			type declarer interface {
-				Declaration() *genai.FunctionDeclaration
-			}
-			sumToolWithDeclaration, ok := sumTool.(declarer)
-			if !ok {
-				t.Fatal("sum tool does not expose a GenAI declaration")
-			}
 
-			req := &model.LLMRequest{
-				Contents: []*genai.Content{
-					{
-						Parts: []*genai.Part{
-							genai.NewPartFromText("Can you add 2 and 3? Also 4 and 5? And 6 and 7?"),
-						},
-						Role: "user",
-					},
+			a, err := llmagent.New(llmagent.Config{
+				Name:        "calculator",
+				Description: "A calculator that can add two integers",
+				Instruction: "You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.",
+				Model:       geminiModel,
+				Tools: []tool.Tool{
+					sumTool,
 				},
-				Config: &genai.GenerateContentConfig{
-					SystemInstruction: &genai.Content{
-						Parts: []*genai.Part{
-							genai.NewPartFromText("You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."),
-						},
-						Role: "user",
-					},
-					Tools: []*genai.Tool{
-						{
-							FunctionDeclarations: []*genai.FunctionDeclaration{
-								sumToolWithDeclaration.Declaration(),
-							},
-						},
-					},
-				},
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
 
-			it := geminiModel.GenerateContent(t.Context(), req, true)
+			sessionService := session.InMemoryService()
+			_, err = sessionService.Create(t.Context(), &session.CreateRequest{
+				AppName:   "testApp",
+				UserID:    "testUser",
+				SessionID: "testSession",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 
+			r, err := runner.New(runner.Config{
+				Agent:          a,
+				SessionService: sessionService,
+				AppName:        "testApp",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			it := r.Run(t.Context(), "testUser", "testSession", &genai.Content{
+				Parts: []*genai.Part{
+					genai.NewPartFromText("Can you add 2 and 3? Also 4 and 5? And 6 and 7?"),
+				},
+				Role: "user",
+			}, agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+
+			functionCalls := make([]*genai.FunctionCall, 0)
+			functionResponses := make([]*genai.FunctionResponse, 0)
 			functionCallsPartial := make([]*genai.FunctionCall, 0)
-			nonPartialResponses := make([]*model.LLMResponse, 0)
-			for resp, err := range it {
+			functionResponsesPartial := make([]*genai.FunctionResponse, 0)
+			nonPartialEvents := make([]*model.LLMResponse, 0)
+
+			handleLoop := func(ev *session.Event) {
+				if !ev.Partial {
+					nonPartialEvents = append(nonPartialEvents, &ev.LLMResponse)
+				}
+				if ev.Content != nil {
+					for _, part := range ev.Content.Parts {
+						if part.FunctionCall != nil {
+							if ev.Partial {
+								functionCallsPartial = append(functionCallsPartial, part.FunctionCall)
+							} else {
+								functionCalls = append(functionCalls, part.FunctionCall)
+							}
+						}
+						if part.FunctionResponse != nil {
+							if ev.Partial {
+								functionResponsesPartial = append(functionResponsesPartial, part.FunctionResponse)
+							} else {
+								functionResponses = append(functionResponses, part.FunctionResponse)
+							}
+						}
+					}
+				}
+			}
+
+			for ev, err := range it {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if resp == nil || resp.Content == nil {
-					t.Fatal("expected non-nil response content")
-				}
-				if !resp.Partial {
-					nonPartialResponses = append(nonPartialResponses, resp)
-				}
-				for _, part := range resp.Content.Parts {
-					if part.FunctionCall != nil && resp.Partial {
-						functionCallsPartial = append(functionCallsPartial, part.FunctionCall)
-					}
-				}
+				handleLoop(ev)
 			}
 
 			ignoreFields := []cmp.Option{
 				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 				cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature"),
+				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 				cmpopts.IgnoreFields(model.LLMResponse{}, "UsageMetadata"),
 			}
 
-			if len(functionCallsPartial) != 3 {
-				t.Errorf("expected 3 partial function calls, got %d", len(functionCallsPartial))
+			if len(functionCalls) != 3 || len(functionResponses) != 3 {
+				t.Errorf("expected 3 function calls and 3 function responses, got %d function calls and %d function responses", len(functionCalls), len(functionResponses))
 			}
-			if len(nonPartialResponses) != 1 {
-				t.Fatalf("expected 1 non-partial response, got %d", len(nonPartialResponses))
+			if len(functionCallsPartial) != 3 || len(functionResponsesPartial) != 0 {
+				t.Errorf("expected 3 partial function calls and 0 partial function responses, got %d partial function calls and %d partial function responses", len(functionCallsPartial), len(functionResponsesPartial))
 			}
 
-			if diff := cmp.Diff(tt.want, nonPartialResponses[0], ignoreFields...); diff != "" {
-				t.Errorf("diff in final response (-want +got): %v", diff)
+			it = r.Run(t.Context(), "testUser", "testSession", &genai.Content{
+				Parts: []*genai.Part{
+					genai.NewPartFromText("Great, now can you add 10 and 20? Also 40 and 50? And 60 and 70?"),
+				},
+				Role: "user",
+			}, agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+			for ev, err := range it {
+				if err != nil {
+					t.Fatal(err)
+				}
+				handleLoop(ev)
 			}
-			for i, part := range nonPartialResponses[0].Content.Parts {
-				if part.FunctionCall != nil && len(part.ThoughtSignature) == 0 {
-					t.Errorf("final response Parts[%d] (%s): expected non-empty thought signature, got empty", i, part.FunctionCall.Name)
+
+			if len(functionCalls) != 6 || len(functionResponses) != 6 {
+				t.Errorf("expected 6 function calls and 6 function responses, got %d function calls and %d function responses", len(functionCalls), len(functionResponses))
+			}
+			if len(functionCallsPartial) != 6 || len(functionResponsesPartial) != 0 {
+				t.Errorf("expected 6 partial function calls and 0 partial function responses, got %d partial function calls and %d partial function responses", len(functionCallsPartial), len(functionResponsesPartial))
+			}
+
+			for i, ev := range nonPartialEvents {
+				if diff := cmp.Diff(tt.wantLLMResponse[i], ev, ignoreFields...); diff != "" {
+					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, ev, tt.wantLLMResponse[i], diff)
+				}
+				if i == 0 || i == 3 {
+					for j, part := range ev.Content.Parts {
+						if part.FunctionCall != nil && len(part.ThoughtSignature) == 0 {
+							t.Errorf("event[%d].Parts[%d] (%s): expected non-empty thought signature, got empty", i, j, part.FunctionCall.Name)
+						}
+					}
 				}
 			}
 		})
