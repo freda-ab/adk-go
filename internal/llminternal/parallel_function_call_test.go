@@ -15,8 +15,13 @@
 package llminternal_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -46,6 +51,96 @@ type SumResult struct {
 
 func sumFunc(ctx tool.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
+}
+
+// parallelThoughtSignatureTransport validates that replayed model-role
+// function call parts all carry thought signatures, then normalizes the request
+// back to the recorded fixture shape where only the first parallel call keeps
+// the signature. This lets the test keep using the existing httprr data.
+type parallelThoughtSignatureTransport struct {
+	base http.RoundTripper
+}
+
+func (t *parallelThoughtSignatureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body == nil {
+		return t.base.RoundTrip(req)
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.Body.Close()
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		return t.base.RoundTrip(req)
+	}
+
+	if err := validateAndNormalizeParallelThoughtSignatures(payload); err != nil {
+		return nil, err
+	}
+
+	normalizedBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(normalizedBody))
+	req.ContentLength = int64(len(normalizedBody))
+	req.Header.Set("Content-Length", strconv.Itoa(len(normalizedBody)))
+
+	return t.base.RoundTrip(req)
+}
+
+func validateAndNormalizeParallelThoughtSignatures(payload map[string]any) error {
+	contents, ok := payload["contents"].([]any)
+	if !ok {
+		return nil
+	}
+
+	for contentIndex, rawContent := range contents {
+		content, ok := rawContent.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := content["role"].(string)
+		if role != "model" {
+			continue
+		}
+
+		parts, ok := content["parts"].([]any)
+		if !ok {
+			continue
+		}
+
+		firstFunctionCall := true
+		for partIndex, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := part["functionCall"]; !ok {
+				continue
+			}
+
+			signature, _ := part["thoughtSignature"].(string)
+			if signature == "" {
+				return fmt.Errorf("content[%d].parts[%d]: expected non-empty thought signature for function call", contentIndex, partIndex)
+			}
+
+			if firstFunctionCall {
+				firstFunctionCall = false
+				continue
+			}
+
+			delete(part, "thoughtSignature")
+		}
+	}
+
+	return nil
 }
 
 var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
@@ -365,6 +460,7 @@ func TestParallelFunctionCalls(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			baseTransport = &parallelThoughtSignatureTransport{base: baseTransport}
 
 			apiKey := ""
 			if recording, _ := httprr.Recording(httpRecordFilename); !recording {
@@ -504,8 +600,10 @@ func TestParallelFunctionCalls(t *testing.T) {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, ev, tt.wantLLMResponse[i], diff)
 				}
 				if i == 0 || i == 3 {
-					if len(ev.Content.Parts[0].ThoughtSignature) == 0 {
-						t.Errorf("expected non-empty thought signature, got empty")
+					for j, part := range ev.Content.Parts {
+						if part.FunctionCall != nil && len(part.ThoughtSignature) == 0 {
+							t.Errorf("event[%d].Parts[%d] (%s): expected non-empty thought signature, got empty", i, j, part.FunctionCall.Name)
+						}
 					}
 				}
 			}
