@@ -15,9 +15,13 @@
 package llminternal
 
 import (
+	"fmt"
+	"log/slog"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -33,31 +37,52 @@ func generateRequestConfirmationEvent(
 	invocationContext agent.InvocationContext,
 	functionCallEvent *session.Event,
 	functionResponseEvent *session.Event,
-) *session.Event {
+) (*session.Event, error) {
 	if functionResponseEvent == nil || len(functionResponseEvent.Actions.RequestedToolConfirmations) == 0 {
-		return nil
+		return nil, nil
 	}
 	if functionCallEvent == nil || functionCallEvent.Content == nil {
-		return nil
+		return nil, nil
 	}
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
-		functionCalls[call.ID] = call
+
+	// Index the original Parts by function call ID so we can carry over
+	// ThoughtSignature. Gemini thinking models require every model-role
+	// function call Part to include its thought signature; without it the
+	// API returns INVALID_ARGUMENT.
+	type originalCall struct {
+		call             *genai.FunctionCall
+		thoughtSignature []byte
+	}
+	originals := make(map[string]originalCall, len(functionCallEvent.Content.Parts))
+	for _, p := range functionCallEvent.Content.Parts {
+		if p.FunctionCall != nil {
+			originals[p.FunctionCall.ID] = originalCall{
+				call:             p.FunctionCall,
+				thoughtSignature: p.ThoughtSignature,
+			}
+		}
 	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalFunctionCall, ok := functionCalls[funcID]
-		if !ok || originalFunctionCall == nil {
+		orig, ok := originals[funcID]
+		if !ok || orig.call == nil {
 			continue
 		}
 
-		// Prepare arguments for the adk_request_confirmation call
+		originalCallMap, err := converters.ToMapStructure(orig.call)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize original function call: %w", err)
+		}
+		confirmationMap, err := converters.ToMapStructure(confirmation)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize tool confirmation: %w", err)
+		}
 		args := map[string]any{
-			"originalFunctionCall": originalFunctionCall,
-			"toolConfirmation":     confirmation,
+			"originalFunctionCall": originalCallMap,
+			"toolConfirmation":     confirmationMap,
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
@@ -66,14 +91,20 @@ func generateRequestConfirmationEvent(
 			Args: args,
 		}
 
+		if len(orig.thoughtSignature) > 0 {
+			slog.Warn("adk_request_confirmation: copying ThoughtSignature from original function call to confirmation Part",
+				"funcName", orig.call.Name, "funcID", funcID)
+		}
+
 		parts = append(parts, &genai.Part{
-			FunctionCall: requestConfirmationFC,
+			FunctionCall:     requestConfirmationFC,
+			ThoughtSignature: orig.thoughtSignature,
 		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
 
 	if len(parts) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	ev := session.NewEvent(invocationContext.InvocationID())
@@ -86,5 +117,5 @@ func generateRequestConfirmationEvent(
 		},
 	}
 	ev.LongRunningToolIDs = longRunningToolIDs
-	return ev
+	return ev, nil
 }
