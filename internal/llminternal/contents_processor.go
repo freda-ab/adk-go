@@ -224,8 +224,13 @@ SearchLoop: // A label to allow breaking out of the nested loop
 		)
 	}
 
-	// Collect all function response events *between* the call and the last response.
+	// Partition intermediate FunctionResponse events into related (to merge) and
+	// unrelated (to preserve). Unrelated FunctionResponse events must be kept so
+	// their corresponding FunctionCall events are not orphaned (e.g., in the
+	// adk_request_confirmation flow).
 	var responseEventsToMerge []*session.Event
+	resultEvents := events[:functionCallEventIdx+1]
+
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
 		responses := utils.FunctionResponses(event.Content)
@@ -233,7 +238,6 @@ SearchLoop: // A label to allow breaking out of the nested loop
 			continue
 		}
 
-		// Check if this event contains any response relevant to our call.
 		isRelated := false
 		for _, res := range responses {
 			if _, exists := responseIDs[res.ID]; exists {
@@ -244,13 +248,13 @@ SearchLoop: // A label to allow breaking out of the nested loop
 
 		if isRelated {
 			responseEventsToMerge = append(responseEventsToMerge, event)
+		} else {
+			resultEvents = append(resultEvents, event)
 		}
 	}
 
-	// Add the final response event itself to the list to be merged.
 	responseEventsToMerge = append(responseEventsToMerge, events[len(events)-1])
 
-	resultEvents := events[:functionCallEventIdx+1]
 	mergedEvent, err := mergeFunctionResponseEvents(responseEventsToMerge)
 	if err != nil {
 		return nil, err
