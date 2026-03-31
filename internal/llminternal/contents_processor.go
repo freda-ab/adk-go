@@ -224,15 +224,22 @@ SearchLoop: // A label to allow breaking out of the nested loop
 		)
 	}
 
-	// Partition intermediate FunctionResponse events into related (to merge) and
-	// unrelated (to preserve). Unrelated FunctionResponse events must be kept so
-	// their corresponding FunctionCall events are not orphaned (e.g., in the
-	// adk_request_confirmation flow).
+	// Partition intermediate events between the matching function call and the
+	// latest function response. Preserve:
+	//   - unrelated FunctionResponse events, so their call events are not orphaned
+	//   - FunctionCall events, so later response events still have a matching call
+	// Related FunctionResponse events are merged with the last response event.
 	var responseEventsToMerge []*session.Event
 	resultEvents := events[:functionCallEventIdx+1]
 
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
+		calls := utils.FunctionCalls(event.Content)
+		if len(calls) > 0 {
+			resultEvents = append(resultEvents, event)
+			continue
+		}
+
 		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
 			continue

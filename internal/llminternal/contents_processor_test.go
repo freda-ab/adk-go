@@ -672,6 +672,20 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"error": "no matching call"},
 	}
 
+	// Separate model events for tool + adk_request_confirmation (confirmation flows).
+	fcConfirmTool := &genai.FunctionCall{ID: "tool_call_X", Name: "tool_a"}
+	fcConfirmADK := &genai.FunctionCall{ID: "confirm_call_Y", Name: "adk_request_confirmation"}
+	frConfirmADK := &genai.FunctionResponse{
+		ID:       "confirm_call_Y",
+		Name:     "adk_request_confirmation",
+		Response: map[string]any{"confirmed": true},
+	}
+	frConfirmTool := &genai.FunctionResponse{
+		ID:       "tool_call_X",
+		Name:     "tool_a",
+		Response: map[string]any{"status": "done"},
+	}
+
 	// --- Test Cases ---
 	testCases := []struct {
 		name    string
@@ -857,80 +871,21 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			// Reproduces the adk_request_confirmation flow where a tool calls
-			// RequestConfirmation(), producing this session sequence:
-			//
-			//   FC(tool_A, id=X)         — model calls the original tool
-			//   FC(adk_confirm, id=Y)    — ADK emits a confirmation request
-			//   FR(tool_A, id=X)         — interim tool response (pending confirmation)
-			//   FR(adk_confirm, id=Y)    — client sends confirmation back
-			//
-			// rearrangeEventsForLatestFunctionResponse sees the last event as
-			// FR(adk_confirm, id=Y), finds its matching call FC(adk_confirm, id=Y),
-			// and must NOT drop FR(tool_A, id=X) — which is unrelated to id=Y.
-			// If it does, FC(tool_A, id=X) is orphaned and the next turn errors.
-			name: "Confirmation flow preserves unrelated intermediate FunctionResponse",
+			// Latest event is FR(tool); rearrangement must keep the intermediate FC(confirm) event.
+			name: "Preserves intermediate function call events",
 			events: []*session.Event{
-				{
-					Author:      "user",
-					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Do something that needs confirmation", "user")},
-				},
-				{
-					// model emits both the original tool call and the confirmation request
-					Author: agentName,
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Role: "model",
-							Parts: []*genai.Part{
-								{FunctionCall: &genai.FunctionCall{ID: "tool_call_X", Name: "show_controls"}},
-								{FunctionCall: &genai.FunctionCall{ID: "confirm_call_Y", Name: "adk_request_confirmation"}},
-							},
-						},
-					},
-				},
-				{
-					// interim tool response (pending confirmation); unrelated to confirm_call_Y
-					Author: "user",
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Role:  "user",
-							Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "tool_call_X", Name: "show_controls", Response: map[string]any{"status": "pending"}}}},
-						},
-					},
-				},
-				{
-					// client sends confirmation back; this is the "last" event
-					Author: "user",
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Role:  "user",
-							Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "confirm_call_Y", Name: "adk_request_confirmation", Response: map[string]any{"confirmed": true}}}},
-						},
-					},
-				},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run a tool that needs confirmation", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmTool, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmADK, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmADK, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmTool, "user")}},
 			},
-			// rearrangeEventsForLatestFunctionResponse preserves FR(tool_call_X), then
-			// rearrangeEventsForFunctionResponsesInHistory consolidates all responses
-			// for the single call event (which contained both FC(tool_call_X) and
-			// FC(confirm_call_Y)) into one merged response event.
 			want: []*genai.Content{
-				genai.NewContentFromText("Do something that needs confirmation", "user"),
-				{
-					Role: "model",
-					Parts: []*genai.Part{
-						{FunctionCall: &genai.FunctionCall{ID: "tool_call_X", Name: "show_controls"}},
-						{FunctionCall: &genai.FunctionCall{ID: "confirm_call_Y", Name: "adk_request_confirmation"}},
-					},
-				},
-				// Both responses are merged into one event by rearrangeEventsForFunctionResponsesInHistory
-				// because both function calls came from the same model event.
-				{
-					Role: "user",
-					Parts: []*genai.Part{
-						{FunctionResponse: &genai.FunctionResponse{ID: "tool_call_X", Name: "show_controls", Response: map[string]any{"status": "pending"}}},
-						{FunctionResponse: &genai.FunctionResponse{ID: "confirm_call_Y", Name: "adk_request_confirmation", Response: map[string]any{"confirmed": true}}},
-					},
-				},
+				genai.NewContentFromText("Run a tool that needs confirmation", "user"),
+				NewContentFromFunctionCall(fcConfirmTool, "model"),
+				NewContentFromFunctionResponse(frConfirmTool, "user"),
+				NewContentFromFunctionCall(fcConfirmADK, "model"),
+				NewContentFromFunctionResponse(frConfirmADK, "user"),
 			},
 		},
 		{
