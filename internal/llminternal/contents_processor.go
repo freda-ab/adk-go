@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
@@ -218,10 +219,13 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	}
 
 	if functionCallEventIdx == -1 {
-		return nil, fmt.Errorf(
-			"no function call event found for function responses ids: %v",
-			responseIDs,
-		)
+		// No matching function call found in history. The responses are stale or
+		// orphaned (e.g. sent after a session restart or a duplicate retry). Treat
+		// this as a no-op rather than hard-failing, so the turn can continue without
+		// the dangling responses.
+		slog.Warn("Orphaned function responses: no matching function call found in session history; dropping stale responses",
+			"responseIDs", responseIDs)
+		return events[:len(events)-1], nil
 	}
 
 	// Partition intermediate events between the matching function call and the
