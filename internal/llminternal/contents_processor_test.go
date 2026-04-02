@@ -871,8 +871,10 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			// Latest event is FR(tool); rearrangement must keep the intermediate FC(confirm) event.
-			name: "Preserves intermediate function call events",
+			// Confirmation events are synthetic ADK control flow and must not be
+			// replayed into model history. Only the original tool call/response
+			// pair should remain in the reconstructed contents.
+			name: "Filters confirmation events from history",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run a tool that needs confirmation", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmTool, "model")}},
@@ -884,8 +886,6 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Run a tool that needs confirmation", "user"),
 				NewContentFromFunctionCall(fcConfirmTool, "model"),
 				NewContentFromFunctionResponse(frConfirmTool, "user"),
-				NewContentFromFunctionCall(fcConfirmADK, "model"),
-				NewContentFromFunctionResponse(frConfirmADK, "user"),
 			},
 		},
 		{

@@ -86,6 +86,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		if isAuthEvent(ev) {
 			continue
 		}
+		if isConfirmationEvent(ev) {
+			continue
+		}
 		if isOtherAgentReply(agentName, ev) {
 			filtered = append(filtered, ConvertForeignEvent(ev))
 		} else {
@@ -523,6 +526,7 @@ func stringify(v any) string {
 // requestEUCFunctionCallName is a special function to handle credential
 // request.
 const requestEUCFunctionCallName = "adk_request_credential"
+const requestConfirmationFunctionCallName = "adk_request_confirmation"
 
 func isAuthEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
@@ -534,6 +538,22 @@ func isAuthEvent(ev *session.Event) bool {
 			return true
 		}
 		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
+			return true
+		}
+	}
+	return false
+}
+
+func isConfirmationEvent(ev *session.Event) bool {
+	c := utils.Content(ev)
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == requestConfirmationFunctionCallName {
+			return true
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestConfirmationFunctionCallName {
 			return true
 		}
 	}
