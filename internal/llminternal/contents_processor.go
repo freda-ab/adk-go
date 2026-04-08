@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
@@ -83,6 +84,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			continue
 		}
 		if isAuthEvent(ev) {
+			continue
+		}
+		if isConfirmationEvent(ev) {
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
@@ -218,10 +222,13 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	}
 
 	if functionCallEventIdx == -1 {
-		return nil, fmt.Errorf(
-			"no function call event found for function responses ids: %v",
-			responseIDs,
-		)
+		// No matching function call found in history. The responses are stale or
+		// orphaned (e.g. sent after a session restart or a duplicate retry). Treat
+		// this as a no-op rather than hard-failing, so the turn can continue without
+		// the dangling responses.
+		slog.Warn("Orphaned function responses: no matching function call found in session history; dropping stale responses",
+			"responseIDs", responseIDs)
+		return events[:len(events)-1], nil
 	}
 
 	// Partition intermediate events between the matching function call and the
@@ -519,6 +526,7 @@ func stringify(v any) string {
 // requestEUCFunctionCallName is a special function to handle credential
 // request.
 const requestEUCFunctionCallName = "adk_request_credential"
+const requestConfirmationFunctionCallName = "adk_request_confirmation"
 
 func isAuthEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
@@ -530,6 +538,22 @@ func isAuthEvent(ev *session.Event) bool {
 			return true
 		}
 		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
+			return true
+		}
+	}
+	return false
+}
+
+func isConfirmationEvent(ev *session.Event) bool {
+	c := utils.Content(ev)
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == requestConfirmationFunctionCallName {
+			return true
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestConfirmationFunctionCallName {
 			return true
 		}
 	}
