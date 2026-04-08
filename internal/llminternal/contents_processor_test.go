@@ -871,8 +871,10 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			// Latest event is FR(tool); rearrangement must keep the intermediate FC(confirm) event.
-			name: "Preserves intermediate function call events",
+			// Confirmation events are synthetic ADK control flow and must not be
+			// replayed into model history. Only the original tool call/response
+			// pair should remain in the reconstructed contents.
+			name: "Filters confirmation events from history",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run a tool that needs confirmation", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmTool, "model")}},
@@ -884,18 +886,34 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Run a tool that needs confirmation", "user"),
 				NewContentFromFunctionCall(fcConfirmTool, "model"),
 				NewContentFromFunctionResponse(frConfirmTool, "user"),
-				NewContentFromFunctionCall(fcConfirmADK, "model"),
-				NewContentFromFunctionResponse(frConfirmADK, "user"),
 			},
 		},
 		{
-			name: "Error on function response without matching call",
+			// Orphaned function response (no matching call in history) must be
+			// dropped gracefully rather than hard-failing. This can happen when a
+			// client retries a stale tool result after a session restart.
+			name: "Orphaned function response without matching call is dropped",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
 			},
-			want:    nil,
-			wantErr: "no function call event found",
+			want: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}},
+			},
+		},
+		{
+			// Same scenario as above but the orphaned response arrives after a
+			// legitimate text reply, to confirm drop-only targets the trailing event.
+			name: "Orphaned function response after text reply is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi there", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+			},
+			want: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: "Hello"}}},
+				{Role: "model", Parts: []*genai.Part{{Text: "Hi there"}}},
+			},
 		},
 	}
 
