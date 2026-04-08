@@ -672,6 +672,20 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"error": "no matching call"},
 	}
 
+	// Separate model events for tool + adk_request_confirmation (confirmation flows).
+	fcConfirmTool := &genai.FunctionCall{ID: "tool_call_X", Name: "tool_a"}
+	fcConfirmADK := &genai.FunctionCall{ID: "confirm_call_Y", Name: "adk_request_confirmation"}
+	frConfirmADK := &genai.FunctionResponse{
+		ID:       "confirm_call_Y",
+		Name:     "adk_request_confirmation",
+		Response: map[string]any{"confirmed": true},
+	}
+	frConfirmTool := &genai.FunctionResponse{
+		ID:       "tool_call_X",
+		Name:     "tool_a",
+		Response: map[string]any{"status": "done"},
+	}
+
 	// --- Test Cases ---
 	testCases := []struct {
 		name    string
@@ -857,13 +871,49 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			name: "Error on function response without matching call",
+			// Confirmation events are synthetic ADK control flow and must not be
+			// replayed into model history. Only the original tool call/response
+			// pair should remain in the reconstructed contents.
+			name: "Filters confirmation events from history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run a tool that needs confirmation", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmTool, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmADK, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmADK, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmTool, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run a tool that needs confirmation", "user"),
+				NewContentFromFunctionCall(fcConfirmTool, "model"),
+				NewContentFromFunctionResponse(frConfirmTool, "user"),
+			},
+		},
+		{
+			// Orphaned function response (no matching call in history) must be
+			// dropped gracefully rather than hard-failing. This can happen when a
+			// client retries a stale tool result after a session restart.
+			name: "Orphaned function response without matching call is dropped",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
 			},
-			want:    nil,
-			wantErr: "no function call event found",
+			want: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}},
+			},
+		},
+		{
+			// Same scenario as above but the orphaned response arrives after a
+			// legitimate text reply, to confirm drop-only targets the trailing event.
+			name: "Orphaned function response after text reply is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi there", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+			},
+			want: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: "Hello"}}},
+				{Role: "model", Parts: []*genai.Part{{Text: "Hi there"}}},
+			},
 		},
 	}
 
