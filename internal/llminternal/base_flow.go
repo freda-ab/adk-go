@@ -212,8 +212,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			// Yield the merged FunctionResponse event first so the runner persists
 			// all tool results to the session before the confirmation event is
 			// processed. This ensures the session is complete even if the consumer
-			// stops after receiving the confirmation (e.g. chat.go returns early to
-			// wait for user input).
+			// stops after receiving the confirmation to wait for user input.
 			if !yield(ev, nil) {
 				return
 			}

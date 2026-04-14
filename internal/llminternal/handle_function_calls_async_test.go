@@ -254,7 +254,7 @@ func (m *confirmationOrderingModel) GenerateContent(
 						FunctionCall: &genai.FunctionCall{
 							ID:   "call-nav",
 							Name: "navigate",
-							Args: map[string]any{"path": "/vendors/hubspot"},
+							Args: map[string]any{"path": "/vendors/example"},
 						},
 					},
 					{
@@ -325,7 +325,7 @@ func TestRunnerPersistsFunctionResponsesBeforeConfirmationWhenConsumerStops(t *t
 
 	it := r.Run(t.Context(), "testUser", "testSession", &genai.Content{
 		Parts: []*genai.Part{
-			genai.NewPartFromText("Set up HubSpot"),
+			genai.NewPartFromText("Set up the vendor"),
 		},
 		Role: "user",
 	}, agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
