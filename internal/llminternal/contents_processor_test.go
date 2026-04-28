@@ -765,6 +765,24 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
+			name: "Rearrangement preserves unrelated function events",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process and search", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process and search", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
 			name: "Rearrangement with mixed LRO and normal calls",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
@@ -897,13 +915,26 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			name: "Error on function response without matching call",
+			name: "Orphaned function response without matching call is dropped",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
 			},
-			want:    nil,
-			wantErr: "no function call event found",
+			want: []*genai.Content{
+				genai.NewContentFromText("Regular message", "user"),
+			},
+		},
+		{
+			name: "Orphaned function response after text reply is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi there", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", "user"),
+				genai.NewContentFromText("Hi there", "model"),
+			},
 		},
 	}
 

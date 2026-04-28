@@ -53,6 +53,8 @@ func sumFunc(ctx tool.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 
+const generatedID = "adk-generated-id"
+
 func ExampleNew() {
 	sumTool, err := functiontool.New(functiontool.Config{
 		Name:        "sum",
@@ -584,18 +586,21 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 1},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 1},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(1)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 			},
 		},
 		{
@@ -608,18 +613,21 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 1},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(1)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
 			},
 		},
@@ -633,18 +641,21 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 1},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(1)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" call is rejected"),
 				}, "user"),
@@ -675,18 +686,21 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 4},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 4},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(4)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 			},
 		},
 		{
@@ -701,18 +715,21 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 4},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(4)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
 			},
 		},
@@ -728,18 +745,21 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
-					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{"Num": 4},
-						Name: "test_tool",
-					},
-					"toolConfirmation": toolconfirmation.ToolConfirmation{
-						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-					},
-				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
 				}, "user"),
+				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
+					"originalFunctionCall": map[string]any{
+						"id":   generatedID,
+						"args": map[string]any{"Num": float64(4)},
+						"name": "test_tool",
+					},
+					"toolConfirmation": map[string]any{
+						"hint":      "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+						"confirmed": false,
+						"payload":   nil,
+					},
+				}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" call is rejected"),
 				}, "user"),
@@ -791,12 +811,15 @@ func TestToolConfirmation(t *testing.T) {
 				}
 
 				if diff := cmp.Diff(tc.want[eventCount], got.Content, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
-					cmp.Transformer("StringifyMapErrors", func(m map[string]any) map[string]any {
+					cmp.Transformer("Transform", func(m map[string]any) map[string]any {
 						out := make(map[string]any, len(m))
 						for k, v := range m {
-							// Check if the value inside the map is an error
+							// Check if the value inside the map is an error, and stringify it.
 							if err, ok := v.(error); ok {
 								out[k] = err.Error() // Convert to string
+							} else if k == "id" {
+								// IDs are generated, replace with a hardcoded placeholder.
+								out[k] = generatedID
 							} else {
 								out[k] = v // Keep as is
 							}
@@ -862,6 +885,60 @@ func TestToolConfirmation(t *testing.T) {
 				t.Errorf("unexpected stream length, want %d got %d", len(tc.want), eventCount)
 			}
 		})
+	}
+}
+
+func TestToolConfirmationYieldsFunctionResponseBeforeConfirmation(t *testing.T) {
+	mockModel := &testutil.MockModel{
+		Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, genai.RoleModel),
+		},
+	}
+
+	myTool, err := functiontool.New(functiontool.Config{
+		Name:                "test_tool",
+		RequireConfirmation: true,
+	}, okFunc)
+	if err != nil {
+		t.Fatalf("Failed to create tool: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "simple agent",
+		Model: mockModel,
+		Tools: []tool.Tool{myTool},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	sawFunctionResponse := false
+	sawConfirmation := false
+
+	for got, err := range runner.Run(t, "id", "message") {
+		// The mock model emits a sentinel error once exhausted; treat any
+		// error as end-of-stream and rely on the post-loop assertions.
+		if err != nil {
+			break
+		}
+
+		for _, part := range got.Content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.Name == "test_tool" {
+				sawFunctionResponse = true
+			}
+			if part.FunctionCall != nil && part.FunctionCall.Name == toolconfirmation.FunctionCallName {
+				sawConfirmation = true
+				if !sawFunctionResponse {
+					t.Fatal("confirmation was yielded before the tool function response")
+				}
+				return
+			}
+		}
+	}
+
+	if !sawConfirmation {
+		t.Fatal("expected confirmation event")
 	}
 }
 
