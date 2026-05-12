@@ -219,16 +219,24 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	}
 
 	if functionCallEventIdx == -1 {
-		return nil, fmt.Errorf(
-			"no function call event found for function responses ids: %v",
-			responseIDs,
-		)
+		// Trailing function-response event has no matching call in history;
+		// treat as stale (e.g. retry/reconnect) and drop it instead of failing
+		// the whole turn. Earlier valid history is preserved.
+		return events[:len(events)-1], nil
 	}
 
-	// Collect all function response events *between* the call and the last response.
+	// Collect function response events related to the matching call while
+	// preserving unrelated tool events that happened in between.
 	var responseEventsToMerge []*session.Event
+	resultEvents := events[:functionCallEventIdx+1]
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
+		calls := utils.FunctionCalls(event.Content)
+		if len(calls) > 0 {
+			resultEvents = append(resultEvents, event)
+			continue
+		}
+
 		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
 			continue
@@ -245,13 +253,14 @@ SearchLoop: // A label to allow breaking out of the nested loop
 
 		if isRelated {
 			responseEventsToMerge = append(responseEventsToMerge, event)
+		} else {
+			resultEvents = append(resultEvents, event)
 		}
 	}
 
 	// Add the final response event itself to the list to be merged.
 	responseEventsToMerge = append(responseEventsToMerge, events[len(events)-1])
 
-	resultEvents := events[:functionCallEventIdx+1]
 	mergedEvent, err := mergeFunctionResponseEvents(responseEventsToMerge)
 	if err != nil {
 		return nil, err
