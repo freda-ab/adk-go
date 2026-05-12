@@ -29,6 +29,8 @@ import (
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -503,5 +505,173 @@ func TestWithInvocationID(t *testing.T) {
 
 	if gotInvocationID != wantInvocationID {
 		t.Errorf("invocation ID = %q, want %q", gotInvocationID, wantInvocationID)
+	}
+}
+
+type drainMockModel struct {
+	Requests  []*model.LLMRequest
+	Responses []*genai.Content
+}
+
+func (m *drainMockModel) Name() string { return "drain-mock" }
+
+func (m *drainMockModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.Requests = append(m.Requests, req)
+		if len(m.Responses) == 0 {
+			yield(nil, fmt.Errorf("no more responses"))
+			return
+		}
+		resp := m.Responses[0]
+		m.Responses = m.Responses[1:]
+		yield(&model.LLMResponse{Content: resp}, nil)
+	}
+}
+
+type echoArgs struct {
+	Msg string `json:"msg"`
+}
+type echoResult struct {
+	Echoed string `json:"echoed"`
+}
+
+func newDrainTestAgent(t *testing.T, m model.LLM) agent.Agent {
+	t.Helper()
+	echoTool, err := functiontool.New(functiontool.Config{
+		Name:        "echo",
+		Description: "echoes input",
+	}, func(ctx tool.Context, input echoArgs) (echoResult, error) {
+		return echoResult{Echoed: input.Msg}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := must(llmagent.New(llmagent.Config{
+		Name:  "drain_agent",
+		Model: m,
+		Tools: []tool.Tool{echoTool},
+	}))
+	return a
+}
+
+func TestWithDrain_StopsAfterCurrentStep(t *testing.T) {
+	t.Parallel()
+
+	mockModel := &drainMockModel{
+		Responses: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{Name: "echo", ID: "call-1", Args: map[string]any{"msg": "hi"}},
+			}}},
+			{Role: "model", Parts: []*genai.Part{{Text: "done"}}},
+		},
+	}
+
+	a := newDrainTestAgent(t, mockModel)
+
+	drainCh := make(chan struct{})
+	close(drainCh)
+
+	ctx := context.Background()
+	sessionService := session.InMemoryService()
+	_, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName: "app", UserID: "user", SessionID: "sess",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := New(Config{
+		AppName:        "app",
+		Agent:          a,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []*session.Event
+	for ev, err := range r.Run(ctx, "user", "sess",
+		genai.NewContentFromText("hello", genai.RoleUser),
+		agent.RunConfig{},
+		WithDrain(drainCh),
+	) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+
+	if got := len(mockModel.Requests); got != 1 {
+		t.Errorf("LLM called %d times, want 1 (drain should prevent second call)", got)
+	}
+
+	var hasFunctionCall, hasFunctionResponse bool
+	for _, ev := range events {
+		if ev.LLMResponse.Content == nil {
+			continue
+		}
+		for _, p := range ev.LLMResponse.Content.Parts {
+			if p.FunctionCall != nil {
+				hasFunctionCall = true
+			}
+			if p.FunctionResponse != nil {
+				hasFunctionResponse = true
+			}
+		}
+	}
+	if !hasFunctionCall {
+		t.Error("expected a function-call event from step 1")
+	}
+	if !hasFunctionResponse {
+		t.Error("expected a function-response event from step 1")
+	}
+}
+
+func TestWithDrain_NoDrainFullExecution(t *testing.T) {
+	t.Parallel()
+
+	mockModel := &drainMockModel{
+		Responses: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{Name: "echo", ID: "call-1", Args: map[string]any{"msg": "hi"}},
+			}}},
+			{Role: "model", Parts: []*genai.Part{{Text: "done"}}},
+		},
+	}
+
+	a := newDrainTestAgent(t, mockModel)
+
+	ctx := context.Background()
+	sessionService := session.InMemoryService()
+	_, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName: "app", UserID: "user", SessionID: "sess",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := New(Config{
+		AppName:        "app",
+		Agent:          a,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for ev, err := range r.Run(ctx, "user", "sess",
+		genai.NewContentFromText("hello", genai.RoleUser),
+		agent.RunConfig{},
+	) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_ = ev
+	}
+
+	if got := len(mockModel.Requests); got != 2 {
+		t.Errorf("LLM called %d times, want 2 (both steps should execute)", got)
 	}
 }

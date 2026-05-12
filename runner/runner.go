@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/drain"
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
@@ -65,8 +66,9 @@ type PluginConfig struct {
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	stateDelta          map[string]any
-	invocationID  string
+	stateDelta   map[string]any
+	invocationID string
+	drainCh      <-chan struct{}
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -80,6 +82,13 @@ func WithStateDelta(delta map[string]any) RunOption {
 // When omitted, a new ID is generated automatically.
 func WithInvocationID(id string) RunOption {
 	return func(o *runOptions) { o.invocationID = id }
+}
+
+// WithDrain sets a drain channel for the run. When the channel is closed (or
+// receives a value), the runner finishes the current LLM step and stops before
+// starting the next iteration.
+func WithDrain(ch <-chan struct{}) RunOption {
+	return func(o *runOptions) { o.drainCh = ch }
 }
 
 // New creates a new [Runner].
@@ -181,6 +190,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		if options.drainCh != nil {
+			ctx = drain.ToContext(ctx, options.drainCh)
+		}
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
