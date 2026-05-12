@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/drain"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/plugininternal/plugincontext"
@@ -117,6 +118,9 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				// We may have reached max token limit during streaming mode.
 				// TODO: handle Partial response in model level. CL 781377328
 				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				return
+			}
+			if drainCh := drain.FromContext(ctx); drain.Signaled(drainCh) {
 				return
 			}
 		}
