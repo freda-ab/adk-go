@@ -114,6 +114,9 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
+				if lastEvent.LLMResponse.TurnComplete {
+					return
+				}
 				// We may have reached max token limit during streaming mode.
 				// TODO: handle Partial response in model level. CL 781377328
 				yield(nil, fmt.Errorf("TODO: last event is not final"))
@@ -148,6 +151,21 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 		if ctx.Ended() {
 			return
+		}
+		if ctx.Resumable() {
+			if ev, err := f.maybeResumeTools(ctx); err != nil {
+				yield(nil, err)
+				return
+			} else if ev != nil {
+				yield(ev, nil)
+				return
+			}
+			if f.shouldStayPaused(ctx) {
+				return
+			}
+		}
+		if ctx.Resumable() {
+			annotateResumeContents(req)
 		}
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)

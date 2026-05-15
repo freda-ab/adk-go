@@ -65,8 +65,9 @@ type PluginConfig struct {
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	stateDelta          map[string]any
-	invocationID  string
+	stateDelta   map[string]any
+	invocationID string
+	resume       bool
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -80,6 +81,16 @@ func WithStateDelta(delta map[string]any) RunOption {
 // When omitted, a new ID is generated automatically.
 func WithInvocationID(id string) RunOption {
 	return func(o *runOptions) { o.invocationID = id }
+}
+
+// WithResume enables resume behavior for the run. When combined with
+// WithInvocationID, the runner checks for existing events with that
+// invocation ID and:
+//   - Short-circuits if the agent already finished
+//   - Re-executes unresponded function calls without calling the LLM
+//   - Skips re-appending the user message (it's already in the session)
+func WithResume() RunOption {
+	return func(o *runOptions) { o.resume = true }
 }
 
 // New creates a new [Runner].
@@ -202,6 +213,21 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		isResume := false
+		if options.resume && options.invocationID != "" {
+			invEvents := eventsForInvocation(storedSession.Events(), options.invocationID)
+			if len(invEvents) > 0 {
+				isResume = true
+				if a := lastActiveAgent(r.rootAgent, invEvents); a != nil {
+					agentToRun = a
+				}
+				done := endOfAgents(invEvents)
+				if done[agentToRun.Name()] {
+					return
+				}
+			}
+		}
+
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:    artifacts,
 			Memory:       memoryImpl,
@@ -210,11 +236,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent:  msg,
 			RunConfig:    &cfg,
 			InvocationID: options.invocationID,
+			Resumable:    isResume,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
-		if err != nil {
-			yield(nil, err)
-			return
+		if !isResume {
+			ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 		}
 
 		pluginManager := r.pluginManager
@@ -295,6 +324,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				UserContent:  msg,
 				RunConfig:    ctx.RunConfig(),
 				InvocationID: ctx.InvocationID(),
+				Resumable:    ctx.Resumable(),
 			})
 		}
 	}

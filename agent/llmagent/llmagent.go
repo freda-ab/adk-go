@@ -369,6 +369,7 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		UserContent:  ctx.UserContent(),
 		RunConfig:    ctx.RunConfig(),
 		InvocationID: ctx.InvocationID(),
+		Resumable:    ctx.Resumable(),
 	})
 
 	f := &llminternal.Flow{

@@ -36,6 +36,7 @@ type InvocationContextParams struct {
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
 	InvocationID  string
+	Resumable     bool
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -92,6 +93,10 @@ func (c *InvocationContext) EndInvocation() {
 
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
+}
+
+func (c *InvocationContext) Resumable() bool {
+	return c.params.Resumable
 }
 
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {

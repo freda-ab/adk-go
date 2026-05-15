@@ -182,6 +182,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			userContent:   ctx.UserContent(),
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
+			resumable:     ctx.Resumable(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -456,6 +457,7 @@ type invocationContext struct {
 	userContent   *genai.Content
 	runConfig     *RunConfig
 	endInvocation bool
+	resumable     bool
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -496,6 +498,10 @@ func (c *invocationContext) EndInvocation() {
 
 func (c *invocationContext) Ended() bool {
 	return c.endInvocation
+}
+
+func (c *invocationContext) Resumable() bool {
+	return c.resumable
 }
 
 func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {

@@ -89,6 +89,7 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				UserContent:  ctx.UserContent(),
 				RunConfig:    ctx.RunConfig(),
 				InvocationID: ctx.InvocationID(),
+				Resumable:    ctx.Resumable(),
 			})
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {

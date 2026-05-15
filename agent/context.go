@@ -96,6 +96,11 @@ type InvocationContext interface {
 	// Ended returns whether the invocation has ended.
 	Ended() bool
 
+	// Resumable returns whether this invocation can resume from a prior attempt.
+	// When true, the flow layer checks for unresponded function calls and
+	// re-executes them without calling the LLM.
+	Resumable() bool
+
 	// WithContext returns a new instance of the context with overridden embedded context.
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
