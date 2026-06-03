@@ -16,6 +16,7 @@ package loadmemorytool_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/loadmemorytool"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type mockMemory struct {
@@ -42,10 +44,11 @@ func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) 
 }
 
 func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	resp := &memory.SearchResponse{Memories: m.memories}
 	if m.err != nil {
-		return nil, m.err
+		return resp, m.err
 	}
-	return &memory.SearchResponse{Memories: m.memories}, nil
+	return resp, nil
 }
 
 func TestLoadMemoryTool_BasicProperties(t *testing.T) {
@@ -131,14 +134,45 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 				return
 			}
 
-			memories, ok := result["memories"].([]memory.Entry)
+			memories, ok := result["memories"].([]any)
 			if !ok {
-				t.Fatalf("result['memories'] is not []memory.Entry, got %T", result["memories"])
+				t.Fatalf("result['memories'] is not []any, got %T", result["memories"])
 			}
 			if len(memories) != tt.wantLen {
 				t.Errorf("Run() returned %d memories, want %d", len(memories), tt.wantLen)
 			}
+			if _, err := structpb.NewStruct(result); err != nil {
+				t.Fatalf("Run() result is not structpb-safe: %v", err)
+			}
 		})
+	}
+}
+
+func TestLoadMemoryTool_Run_ReturnsPartialResultsOnSearchError(t *testing.T) {
+	t.Parallel()
+	searchErr := errors.New("failing: search failed")
+	tool := loadmemorytool.New()
+	tc := createToolContext(t, &mockMemory{
+		memories: []memory.Entry{{
+			ID:      "mem-1",
+			Content: genai.NewContentFromText("still available", genai.RoleUser),
+		}},
+		err: searchErr,
+	})
+
+	result, err := tool.Run(tc, map[string]any{"query": "project alpha"})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil with partial results", err)
+	}
+	if got, ok := result["error"].(string); !ok || got != searchErr.Error() {
+		t.Fatalf("result[error] = %v, want %q", result["error"], searchErr.Error())
+	}
+	memories, ok := result["memories"].([]any)
+	if !ok || len(memories) != 1 {
+		t.Fatalf("result[memories] = %T len=%d, want []any with 1 entry", result["memories"], len(memories))
+	}
+	if _, err := structpb.NewStruct(result); err != nil {
+		t.Fatalf("Run() result is not structpb-safe: %v", err)
 	}
 }
 

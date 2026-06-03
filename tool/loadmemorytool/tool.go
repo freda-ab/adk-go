@@ -19,6 +19,8 @@ package loadmemorytool
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -97,14 +99,60 @@ func (t *loadMemoryTool) Run(toolCtx tool.Context, args any) (map[string]any, er
 	}
 
 	searchResponse, err := toolCtx.SearchMemory(toolCtx, query)
+	result := map[string]any{"memories": memoryEntriesForToolResult(searchResponse)}
 	if err != nil {
-		return nil, fmt.Errorf("failed to search memory: %w", err)
+		if searchResponse == nil || len(searchResponse.Memories) == 0 {
+			return nil, fmt.Errorf("failed to search memory: %w", err)
+		}
+		// Partial results: return hits and surface the error for the model.
+		result["error"] = err.Error()
+		return result, nil
 	}
+	return result, nil
+}
 
-	if searchResponse == nil || searchResponse.Memories == nil {
-		return map[string]any{"memories": []memory.Entry{}}, nil
+func memoryEntriesForToolResult(resp *memory.SearchResponse) []any {
+	if resp == nil || len(resp.Memories) == 0 {
+		return []any{}
 	}
-	return map[string]any{"memories": searchResponse.Memories}, nil
+	memories := make([]any, 0, len(resp.Memories))
+	for _, entry := range resp.Memories {
+		memoryMap := map[string]any{}
+		if entry.ID != "" {
+			memoryMap["id"] = entry.ID
+		}
+		if entry.Author != "" {
+			memoryMap["author"] = entry.Author
+		}
+		if !entry.Timestamp.IsZero() {
+			memoryMap["timestamp"] = entry.Timestamp.UTC().Format(time.RFC3339)
+		}
+		if text := memoryEntryText(entry); text != "" {
+			memoryMap["text"] = text
+		}
+		if len(entry.CustomMetadata) > 0 {
+			memoryMap["customMetadata"] = entry.CustomMetadata
+		}
+		memories = append(memories, memoryMap)
+	}
+	return memories
+}
+
+func memoryEntryText(entry memory.Entry) string {
+	if entry.Content == nil || len(entry.Content.Parts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range entry.Content.Parts {
+		if part == nil || part.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String()
 }
 
 // ProcessRequest processes the LLM request by packing the tool and appending
