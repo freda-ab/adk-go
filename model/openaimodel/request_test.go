@@ -185,13 +185,92 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{InlineData: &genai.Blob{Data: []byte{0x1}}},
+					{InlineData: &genai.Blob{Data: []byte{0x1}, MIMEType: "audio/mpeg"}},
 				},
 			},
 		},
 	}
-	if _, err := buildOpenAIParams("fallback", req); err == nil {
-		t.Fatalf("expected error for inline data part")
+	if _, err := buildOpenAIParams("fallback", req); !errors.Is(err, ErrUnsupportedInlineDataMIMEType) {
+		t.Fatalf("error = %v, want %v", err, ErrUnsupportedInlineDataMIMEType)
+	}
+}
+
+func TestBuildOpenAIParams_InlineDataPreservesOrder(t *testing.T) {
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{
+			Role: string(genai.RoleUser),
+			Parts: []*genai.Part{
+				{Text: "before"},
+				{InlineData: &genai.Blob{Data: []byte{1}, MIMEType: "image/jpeg"}},
+				{InlineData: &genai.Blob{Data: []byte{2}, MIMEType: "application/pdf", DisplayName: "report.pdf"}},
+				{InlineData: &genai.Blob{Data: []byte("a,b"), MIMEType: "text/csv; charset=utf-8"}},
+				{Text: "after"},
+			},
+		},
+		genai.NewContentFromText("next message", genai.RoleUser),
+	}}
+
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := params.Input.OfInputItemList[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 5 {
+		t.Fatalf("content length = %d, want 5", len(content))
+	}
+	if content[0].OfInputText.Text != "before" || content[4].OfInputText.Text != "after" {
+		t.Fatalf("text order was not preserved: %+v", content)
+	}
+	if got := content[1].OfInputImage.ImageURL.Value; got != "data:image/jpeg;base64,AQ==" {
+		t.Fatalf("image URL = %q", got)
+	}
+	if got := content[2].OfInputFile.FileData.Value; got != "data:application/pdf;base64,Ag==" {
+		t.Fatalf("file data = %q", got)
+	}
+	if got := content[2].OfInputFile.Filename.Value; got != "report.pdf" {
+		t.Fatalf("filename = %q", got)
+	}
+	if got := content[3].OfInputText.Text; got != "a,b" {
+		t.Fatalf("inline text = %q", got)
+	}
+	if got := params.Input.OfInputItemList[1].OfMessage.Content.OfInputItemContentList[0].OfInputText.Text; got != "next message" {
+		t.Fatalf("second message = %q", got)
+	}
+}
+
+func TestConvertInlineData_SupportedMIMETypes(t *testing.T) {
+	tests := []struct {
+		mimeType string
+		kind     string
+	}{
+		{"image/jpeg", "image"},
+		{"image/png", "image"},
+		{"image/gif", "image"},
+		{"image/webp", "image"},
+		{"application/pdf", "file"},
+		{"text/plain", "text"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.mimeType, func(t *testing.T) {
+			got, err := convertInlineData(&genai.Blob{Data: []byte("data"), MIMEType: tc.mimeType})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.kind {
+			case "image":
+				if got.OfInputImage == nil {
+					t.Fatalf("got %+v", got)
+				}
+			case "file":
+				if got.OfInputFile == nil || got.OfInputFile.Filename.Value != "document.pdf" {
+					t.Fatalf("got %+v", got)
+				}
+			case "text":
+				if got.OfInputText == nil || got.OfInputText.Text != "data" {
+					t.Fatalf("got %+v", got)
+				}
+			}
+		})
 	}
 }
 

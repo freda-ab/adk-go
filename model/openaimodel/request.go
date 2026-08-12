@@ -16,8 +16,10 @@ package openaimodel
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"sort"
 	"strings"
 
@@ -96,25 +98,23 @@ func applyStatelessConfig(params *responses.ResponseNewParams) {
 
 func convertContents(contents []*genai.Content) (responses.ResponseInputParam, error) {
 	var (
-		items     responses.ResponseInputParam
-		tracker   callTracker
-		textParts []string
-		reasoning            = make(map[string]struct{})
-		curRole   genai.Role = genai.RoleUser
-		// flushText is a helper function that takes any accumulated text parts
-		// and converts them into a message, then appends it to our items.
-		flushText = func() error {
-			if len(textParts) == 0 {
+		items        responses.ResponseInputParam
+		tracker      callTracker
+		messageParts responses.ResponseInputMessageContentListParam
+		reasoning               = make(map[string]struct{})
+		curRole      genai.Role = genai.RoleUser
+		flushMessage            = func() error {
+			if len(messageParts) == 0 {
 				return nil
 			}
-			msg, err := newMessage(curRole, textParts)
+			msg, err := newMessage(curRole, messageParts)
 			if err != nil {
 				return err
 			}
 			if msg != nil {
 				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
 			}
-			textParts = textParts[:0]
+			messageParts = nil
 			return nil
 		}
 	)
@@ -128,7 +128,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if part != nil && curRole == genai.RoleModel {
 				reasoningParam, handled := decodeReasoningPart(part)
 				if handled {
-					if err := flushText(); err != nil {
+					if err := flushMessage(); err != nil {
 						return nil, err
 					}
 					signature := string(part.ThoughtSignature)
@@ -147,10 +147,19 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			case part.Thought:
 				continue
 			case part.Text != "":
-				textParts = append(textParts, part.Text)
+				if strings.TrimSpace(part.Text) != "" {
+					messageParts = append(messageParts, responses.ResponseInputContentUnionParam{
+						OfInputText: &responses.ResponseInputTextParam{Text: part.Text, Type: constant.InputText("input_text")},
+					})
+				}
+			case part.InlineData != nil:
+				inline, err := convertInlineData(part.InlineData)
+				if err != nil {
+					return nil, err
+				}
+				messageParts = append(messageParts, inline)
 			case part.FunctionCall != nil:
-				// If we encounter a function call, we first flush any accumulated text.
-				if err := flushText(); err != nil {
+				if err := flushMessage(); err != nil {
 					return nil, err
 				}
 				callParam, err := tracker.newFunctionCall(part.FunctionCall)
@@ -159,8 +168,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
-				// Similarly, for a function response, we flush text before adding the response.
-				if err := flushText(); err != nil {
+				if err := flushMessage(); err != nil {
 					return nil, err
 				}
 				respParam, err := tracker.newFunctionResponse(part.FunctionResponse)
@@ -172,8 +180,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				return nil, fmt.Errorf("openai: unsupported content part %T", part)
 			}
 		}
-		// After processing all parts in a content block, we flush any remaining text.
-		if err := flushText(); err != nil {
+		if err := flushMessage(); err != nil {
 			return nil, err
 		}
 	}
@@ -193,37 +200,58 @@ func decodeReasoningPart(part *genai.Part) (*responses.ResponseReasoningItemPara
 	return &reasoning, true
 }
 
-func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessageParam, error) {
-	if len(texts) == 0 {
+func newMessage(role genai.Role, content responses.ResponseInputMessageContentListParam) (*responses.EasyInputMessageParam, error) {
+	if len(content) == 0 {
 		return nil, nil
 	}
 	msgRole, err := normalizeRole(role)
 	if err != nil {
 		return nil, err
 	}
-	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
-	for _, txt := range texts {
-		if strings.TrimSpace(txt) == "" {
-			continue
-		}
-		textParam := responses.ResponseInputTextParam{
-			Text: txt,
-			Type: constant.InputText("input_text"),
-		}
-		contentList = append(contentList, responses.ResponseInputContentUnionParam{
-			OfInputText: &textParam,
-		})
-	}
-	if len(contentList) == 0 {
-		return nil, nil
-	}
 	return &responses.EasyInputMessageParam{
 		Role: msgRole,
 		Type: responses.EasyInputMessageTypeMessage,
 		Content: responses.EasyInputMessageContentUnionParam{
-			OfInputItemContentList: contentList,
+			OfInputItemContentList: content,
 		},
 	}, nil
+}
+
+func convertInlineData(blob *genai.Blob) (responses.ResponseInputContentUnionParam, error) {
+	mediaType, _, err := mime.ParseMediaType(blob.MIMEType)
+	if err != nil {
+		return responses.ResponseInputContentUnionParam{}, fmt.Errorf("%w: %s", ErrUnsupportedInlineDataMIMEType, blob.MIMEType)
+	}
+
+	dataURL := func() string {
+		return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(blob.Data)
+	}
+	switch mediaType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return responses.ResponseInputContentUnionParam{OfInputImage: &responses.ResponseInputImageParam{
+			Detail:   responses.ResponseInputImageDetailAuto,
+			ImageURL: param.NewOpt(dataURL()),
+			Type:     constant.InputImage("input_image"),
+		}}, nil
+	case "application/pdf":
+		filename := blob.DisplayName
+		if filename == "" {
+			filename = "document.pdf"
+		}
+		return responses.ResponseInputContentUnionParam{OfInputFile: &responses.ResponseInputFileParam{
+			FileData: param.NewOpt(dataURL()),
+			Filename: param.NewOpt(filename),
+			Type:     constant.InputFile("input_file"),
+		}}, nil
+	default:
+		if strings.HasPrefix(mediaType, "text/") {
+			return responses.ResponseInputContentUnionParam{OfInputText: &responses.ResponseInputTextParam{
+				Text: string(blob.Data),
+				Type: constant.InputText("input_text"),
+			}}, nil
+		}
+		return responses.ResponseInputContentUnionParam{}, fmt.Errorf("%w: %s", ErrUnsupportedInlineDataMIMEType, blob.MIMEType)
+	}
 }
 
 func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {

@@ -39,6 +39,8 @@ var (
 	ErrThinkingLevelNotSupported = errors.New("openai: thinking level is not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
+	// ErrUnsupportedInlineDataMIMEType is returned for unsupported inline input data.
+	ErrUnsupportedInlineDataMIMEType = errors.New("openai: unsupported inline data mime type")
 
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
