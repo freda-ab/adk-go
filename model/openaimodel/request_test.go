@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -95,6 +96,88 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 	}
 }
 
+func TestConvertContents_ReplaysReasoningInOrder(t *testing.T) {
+	var item responses.ResponseOutputItemUnion
+	if err := json.Unmarshal([]byte(`{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"Checked constraints."}],"encrypted_content":"encrypted"}`), &item); err != nil {
+		t.Fatal(err)
+	}
+	parts, err := convertReasoningItem(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := convertContents([]*genai.Content{
+		{Role: string(genai.RoleModel), Parts: []*genai.Part{parts[0], {Text: "answer"}}},
+		genai.NewContentFromText("next", genai.RoleUser),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[0].OfReasoning == nil || items[1].OfOutputMessage == nil || items[2].OfMessage == nil {
+		t.Fatalf("unexpected input order: %+v", items)
+	}
+	encoded, err := json.Marshal(items[0].OfReasoning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"encrypted_content":"encrypted"`) {
+		t.Fatalf("reasoning item lost encrypted content: %s", encoded)
+	}
+}
+
+func TestConvertContents_UsesOutputTextForAssistantHistory(t *testing.T) {
+	items, err := convertContents([]*genai.Content{
+		genai.NewContentFromText("previous answer", genai.RoleModel),
+		genai.NewContentFromText("follow-up", genai.RoleUser),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].OfOutputMessage == nil || items[1].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	output := items[0].OfOutputMessage.Content
+	if len(output) != 1 || output[0].OfOutputText == nil || output[0].OfOutputText.Text != "previous answer" {
+		t.Fatalf("unexpected assistant content: %+v", output)
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"role":"assistant","content":[{"type":"input_text"`) {
+		t.Fatalf("assistant history used input_text: %s", encoded)
+	}
+}
+
+func TestConvertContents_DropsInvalidReasoningSignatures(t *testing.T) {
+	items, err := convertContents([]*genai.Content{{
+		Role: string(genai.RoleModel),
+		Parts: []*genai.Part{
+			{Text: "unsigned", Thought: true},
+			{Text: "malformed", Thought: true, ThoughtSignature: []byte(openAIReasoningSignaturePrefix + "{")},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected invalid reasoning to be dropped, got %+v", items)
+	}
+}
+
+func TestApplyStatelessConfig(t *testing.T) {
+	params := &responses.ResponseNewParams{}
+	applyStatelessConfig(params)
+	applyStatelessConfig(params)
+
+	if !params.Store.Valid() || params.Store.Value {
+		t.Fatalf("Store = %+v, want explicit false", params.Store)
+	}
+	if got := params.Include; !reflect.DeepEqual(got, []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}) {
+		t.Fatalf("Include = %v", got)
+	}
+}
+
 func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("respond JSON", genai.RoleUser)},
@@ -126,13 +209,92 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{InlineData: &genai.Blob{Data: []byte{0x1}}},
+					{InlineData: &genai.Blob{Data: []byte{0x1}, MIMEType: "audio/mpeg"}},
 				},
 			},
 		},
 	}
-	if _, err := buildOpenAIParams("fallback", req); err == nil {
-		t.Fatalf("expected error for inline data part")
+	if _, err := buildOpenAIParams("fallback", req); !errors.Is(err, ErrUnsupportedInlineDataMIMEType) {
+		t.Fatalf("error = %v, want %v", err, ErrUnsupportedInlineDataMIMEType)
+	}
+}
+
+func TestBuildOpenAIParams_InlineDataPreservesOrder(t *testing.T) {
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{
+			Role: string(genai.RoleUser),
+			Parts: []*genai.Part{
+				{Text: "before"},
+				{InlineData: &genai.Blob{Data: []byte{1}, MIMEType: "image/jpeg"}},
+				{InlineData: &genai.Blob{Data: []byte{2}, MIMEType: "application/pdf", DisplayName: "report.pdf"}},
+				{InlineData: &genai.Blob{Data: []byte("a,b"), MIMEType: "text/csv; charset=utf-8"}},
+				{Text: "after"},
+			},
+		},
+		genai.NewContentFromText("next message", genai.RoleUser),
+	}}
+
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := params.Input.OfInputItemList[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 5 {
+		t.Fatalf("content length = %d, want 5", len(content))
+	}
+	if content[0].OfInputText.Text != "before" || content[4].OfInputText.Text != "after" {
+		t.Fatalf("text order was not preserved: %+v", content)
+	}
+	if got := content[1].OfInputImage.ImageURL.Value; got != "data:image/jpeg;base64,AQ==" {
+		t.Fatalf("image URL = %q", got)
+	}
+	if got := content[2].OfInputFile.FileData.Value; got != "data:application/pdf;base64,Ag==" {
+		t.Fatalf("file data = %q", got)
+	}
+	if got := content[2].OfInputFile.Filename.Value; got != "report.pdf" {
+		t.Fatalf("filename = %q", got)
+	}
+	if got := content[3].OfInputText.Text; got != "a,b" {
+		t.Fatalf("inline text = %q", got)
+	}
+	if got := params.Input.OfInputItemList[1].OfMessage.Content.OfInputItemContentList[0].OfInputText.Text; got != "next message" {
+		t.Fatalf("second message = %q", got)
+	}
+}
+
+func TestConvertInlineData_SupportedMIMETypes(t *testing.T) {
+	tests := []struct {
+		mimeType string
+		kind     string
+	}{
+		{"image/jpeg", "image"},
+		{"image/png", "image"},
+		{"image/gif", "image"},
+		{"image/webp", "image"},
+		{"application/pdf", "file"},
+		{"text/plain", "text"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.mimeType, func(t *testing.T) {
+			got, err := convertInlineData(&genai.Blob{Data: []byte("data"), MIMEType: tc.mimeType})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.kind {
+			case "image":
+				if got.OfInputImage == nil {
+					t.Fatalf("got %+v", got)
+				}
+			case "file":
+				if got.OfInputFile == nil || got.OfInputFile.Filename.Value != "document.pdf" {
+					t.Fatalf("got %+v", got)
+				}
+			case "text":
+				if got.OfInputText == nil || got.OfInputText.Text != "data" {
+					t.Fatalf("got %+v", got)
+				}
+			}
+		})
 	}
 }
 
@@ -194,9 +356,8 @@ func TestApplyGenerationConfig(t *testing.T) {
 			wantErr: ErrLabelsNotSupported,
 		},
 		{
-			name:    "Safety settings not supported",
-			cfg:     &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
-			wantErr: ErrSafetySettingsNotSupported,
+			name: "Gemini safety settings are ignored",
+			cfg:  &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
 		},
 		{
 			name:    "Unsupported MIME type",
@@ -272,6 +433,59 @@ func TestApplyGenerationConfig(t *testing.T) {
 			}
 			if tc.wantParams != nil && !reflect.DeepEqual(params, tc.wantParams) {
 				t.Errorf("applyGenerationConfig() params = %+v, want %+v", params, tc.wantParams)
+			}
+		})
+	}
+}
+
+func TestApplyGenerationConfig_Thinking(t *testing.T) {
+	tests := []struct {
+		name        string
+		model       string
+		thinking    *genai.ThinkingConfig
+		wantEffort  shared.ReasoningEffort
+		wantSummary shared.ReasoningSummary
+		wantErr     error
+	}{
+		{
+			name:  "effort and summary",
+			model: "gpt-5.6-sol",
+			thinking: &genai.ThinkingConfig{
+				ThinkingLevel:   genai.ThinkingLevelHigh,
+				IncludeThoughts: true,
+			},
+			wantEffort:  shared.ReasoningEffortHigh,
+			wantSummary: shared.ReasoningSummaryAuto,
+		},
+		{
+			name:       "gpt-5.6 minimal becomes low",
+			model:      "gpt-5.6-terra",
+			thinking:   &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal},
+			wantEffort: shared.ReasoningEffortLow,
+		},
+		{
+			name:       "extended effort",
+			model:      "gpt-5.6-luna",
+			thinking:   &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("MAX")},
+			wantEffort: shared.ReasoningEffortMax,
+		},
+		{
+			name:     "unknown effort",
+			model:    "gpt-test",
+			thinking: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("UNKNOWN")},
+			wantErr:  ErrThinkingLevelNotSupported,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{Model: shared.ResponsesModel(tc.model)}
+			err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, tc.wantErr)
+			}
+			if params.Reasoning.Effort != tc.wantEffort || params.Reasoning.Summary != tc.wantSummary {
+				t.Fatalf("Reasoning = %+v", params.Reasoning)
 			}
 		})
 	}

@@ -186,6 +186,9 @@ func TestConvertFunctionDeclaration(t *testing.T) {
 				if fn.Name != tc.decl.Name {
 					t.Fatalf("unexpected fn: %+v", fn)
 				}
+				if !fn.Strict.Valid() || fn.Strict.Value {
+					t.Fatalf("strict = %+v, want explicit false", fn.Strict)
+				}
 				if fn.Parameters["type"] != "object" {
 					t.Fatalf("expected default object schema, got: %+v", fn.Parameters)
 				}

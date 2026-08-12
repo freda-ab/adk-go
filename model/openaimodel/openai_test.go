@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -66,6 +67,38 @@ func TestModel_Generate(t *testing.T) {
 	}
 	if diff := cmp.Diff("hello", text); diff != "" {
 		t.Fatalf("response text mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestModel_Generate_StatelessRequest(t *testing.T) {
+	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Store   *bool    `json:"store"`
+			Include []string `json:"include"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Store == nil || *body.Store || len(body.Include) != 1 || body.Include[0] != "reasoning.encrypted_content" {
+			t.Fatalf("unexpected stateless request: %+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_123","model":"test-model","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}`)
+	}))
+	defer server.Close()
+
+	llm, err := NewModel(t.Context(), openai.ChatModelGPT4oMini, &ClientConfig{
+		APIKey: "test", BaseURL: server.URL + "/v1", HTTPClient: server.Client(), Stateless: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range llm.GenerateContent(t.Context(), &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+	}, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -131,6 +164,39 @@ func TestModel_GenerateStream_Metadata(t *testing.T) {
 	}
 	if finalResp.UsageMetadata.TotalTokenCount != 10 {
 		t.Errorf("expected final UsageMetadata.TotalTokenCount=10, got %d", finalResp.UsageMetadata.TotalTokenCount)
+	}
+}
+
+func TestModel_GenerateStream_PreservesReasoningSignature(t *testing.T) {
+	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: "+`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"Checked."}],"encrypted_content":"encrypted"},{"type":"message","content":[{"type":"output_text","text":"done"}]}],"usage":{"total_tokens":9}}}`+"\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	llm, err := NewModel(t.Context(), openai.ChatModelGPT4oMini, &ClientConfig{
+		APIKey: "test", BaseURL: server.URL + "/v1", HTTPClient: server.Client(), Stateless: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final *model.LLMResponse
+	for resp, err := range llm.GenerateContent(t.Context(), &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+	}, true) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		final = resp
+	}
+	if final == nil || final.Content == nil || len(final.Content.Parts) != 2 {
+		t.Fatalf("unexpected final response: %+v", final)
+	}
+	if got := final.Content.Parts[0]; !got.Thought || len(got.ThoughtSignature) == 0 || got.Text != "Checked." {
+		t.Fatalf("reasoning part = %+v", got)
+	}
+	if final.UsageMetadata == nil || final.UsageMetadata.TotalTokenCount != 9 {
+		t.Fatalf("usage = %+v", final.UsageMetadata)
 	}
 }
 

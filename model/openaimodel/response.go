@@ -23,6 +23,8 @@ import (
 	"google.golang.org/genai"
 )
 
+const openAIReasoningSignaturePrefix = "\x00openai:reasoning\x00"
+
 // convertResponse takes an OpenAI API response and transforms it into our
 // generic genai.GenerateContentResponse format.
 func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, error) {
@@ -89,23 +91,57 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 			}
 			parts = append(parts, part)
 		case "reasoning":
-			for _, chunk := range item.Content {
-				if chunk.Text != "" {
-					parts = append(parts, &genai.Part{Text: chunk.Text, Thought: true})
-				}
-				// We also check for summary content within reasoning items.
+			reasoningParts, err := convertReasoningItem(item)
+			if err != nil {
+				return nil, err
 			}
-			for _, summary := range item.Summary {
-				if summary.Text != "" {
-					parts = append(parts, &genai.Part{Text: summary.Text, Thought: true})
-				}
-			}
+			parts = append(parts, reasoningParts...)
 		default:
 			return nil, fmt.Errorf("%w: %q", ErrUnsupportedOutputItemType, item.Type)
 		}
 	}
 	if len(parts) == 0 {
 		return nil, ErrNoTextOrToolContent
+	}
+	return parts, nil
+}
+
+func convertReasoningItem(item responses.ResponseOutputItemUnion) ([]*genai.Part, error) {
+	raw := item.RawJSON()
+	if raw == "" {
+		encoded, err := json.Marshal(struct {
+			ID               string                                   `json:"id"`
+			Summary          []responses.ResponseReasoningItemSummary `json:"summary"`
+			Type             string                                   `json:"type"`
+			EncryptedContent string                                   `json:"encrypted_content,omitempty"`
+			Status           string                                   `json:"status,omitempty"`
+		}{
+			ID:               item.ID,
+			Summary:          item.Summary,
+			Type:             item.Type,
+			EncryptedContent: item.EncryptedContent,
+			Status:           item.Status,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("openai: encode reasoning item: %w", err)
+		}
+		raw = string(encoded)
+	}
+
+	signature := append([]byte(openAIReasoningSignaturePrefix), raw...)
+	parts := make([]*genai.Part, 0, len(item.Content)+len(item.Summary))
+	for _, content := range item.Content {
+		if content.Text != "" {
+			parts = append(parts, &genai.Part{Text: content.Text, Thought: true, ThoughtSignature: signature})
+		}
+	}
+	for _, summary := range item.Summary {
+		if summary.Text != "" {
+			parts = append(parts, &genai.Part{Text: summary.Text, Thought: true, ThoughtSignature: signature})
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, &genai.Part{Thought: true, ThoughtSignature: signature})
 	}
 	return parts, nil
 }

@@ -35,10 +35,12 @@ var (
 	ErrPenaltiesNotSupported = errors.New("openai: frequency/presence penalties are not supported")
 	// ErrLabelsNotSupported is returned when request labels are used, which is not supported.
 	ErrLabelsNotSupported = errors.New("openai: request labels are not supported")
-	// ErrSafetySettingsNotSupported is returned when Gemini safety settings are used, which is not supported.
-	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
+	// ErrThinkingLevelNotSupported is returned for unknown reasoning effort levels.
+	ErrThinkingLevelNotSupported = errors.New("openai: thinking level is not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
+	// ErrUnsupportedInlineDataMIMEType is returned for unsupported inline input data.
+	ErrUnsupportedInlineDataMIMEType = errors.New("openai: unsupported inline data mime type")
 
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
