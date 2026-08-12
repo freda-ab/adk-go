@@ -336,6 +336,59 @@ func TestApplyGenerationConfig(t *testing.T) {
 	}
 }
 
+func TestApplyGenerationConfig_Thinking(t *testing.T) {
+	tests := []struct {
+		name        string
+		model       string
+		thinking    *genai.ThinkingConfig
+		wantEffort  shared.ReasoningEffort
+		wantSummary shared.ReasoningSummary
+		wantErr     error
+	}{
+		{
+			name:  "effort and summary",
+			model: "gpt-5.6-sol",
+			thinking: &genai.ThinkingConfig{
+				ThinkingLevel:   genai.ThinkingLevelHigh,
+				IncludeThoughts: true,
+			},
+			wantEffort:  shared.ReasoningEffortHigh,
+			wantSummary: shared.ReasoningSummaryAuto,
+		},
+		{
+			name:       "gpt-5.6 minimal becomes low",
+			model:      "gpt-5.6-terra",
+			thinking:   &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal},
+			wantEffort: shared.ReasoningEffortLow,
+		},
+		{
+			name:       "extended effort",
+			model:      "gpt-5.6-luna",
+			thinking:   &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("MAX")},
+			wantEffort: shared.ReasoningEffortMax,
+		},
+		{
+			name:     "unknown effort",
+			model:    "gpt-test",
+			thinking: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("UNKNOWN")},
+			wantErr:  ErrThinkingLevelNotSupported,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{Model: shared.ResponsesModel(tc.model)}
+			err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, tc.wantErr)
+			}
+			if params.Reasoning.Effort != tc.wantEffort || params.Reasoning.Summary != tc.wantSummary {
+				t.Fatalf("Reasoning = %+v", params.Reasoning)
+			}
+		})
+	}
+}
+
 func TestFlattenContentText(t *testing.T) {
 	tests := []struct {
 		name    string

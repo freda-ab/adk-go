@@ -362,6 +362,28 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 			params.Instructions = param.NewOpt(inst)
 		}
 	}
+	if thinking := cfg.ThinkingConfig; thinking != nil {
+		effort := strings.ToLower(string(thinking.ThinkingLevel))
+		if effort == string(shared.ReasoningEffortMinimal) && strings.HasPrefix(strings.ToLower(string(params.Model)), "gpt-5.6") {
+			effort = string(shared.ReasoningEffortLow)
+		}
+		switch shared.ReasoningEffort(effort) {
+		case "", shared.ReasoningEffort("thinking_level_unspecified"):
+		case shared.ReasoningEffortNone,
+			shared.ReasoningEffortMinimal,
+			shared.ReasoningEffortLow,
+			shared.ReasoningEffortMedium,
+			shared.ReasoningEffortHigh,
+			shared.ReasoningEffortXhigh,
+			shared.ReasoningEffortMax:
+			params.Reasoning.Effort = shared.ReasoningEffort(effort)
+		default:
+			return fmt.Errorf("%w: %s", ErrThinkingLevelNotSupported, thinking.ThinkingLevel)
+		}
+		if thinking.IncludeThoughts {
+			params.Reasoning.Summary = shared.ReasoningSummaryAuto
+		}
+	}
 	if cfg.ResponseMIMEType != "" && cfg.ResponseMIMEType != "text/plain" && cfg.ResponseMIMEType != "application/json" {
 		return fmt.Errorf("%w: %s", ErrUnsupportedMIMEType, cfg.ResponseMIMEType)
 	}
