@@ -410,9 +410,6 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	if cfg.Labels != nil {
 		return ErrLabelsNotSupported
 	}
-	if cfg.SafetySettings != nil {
-		return ErrSafetySettingsNotSupported
-	}
 	return nil
 }
 

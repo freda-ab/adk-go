@@ -253,9 +253,8 @@ func TestApplyGenerationConfig(t *testing.T) {
 			wantErr: ErrLabelsNotSupported,
 		},
 		{
-			name:    "Safety settings not supported",
-			cfg:     &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
-			wantErr: ErrSafetySettingsNotSupported,
+			name: "Gemini safety settings are ignored",
+			cfg:  &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
 		},
 		{
 			name:    "Unsupported MIME type",
