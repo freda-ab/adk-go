@@ -113,7 +113,7 @@ func TestConvertContents_ReplaysReasoningInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[0].OfReasoning == nil || items[1].OfMessage == nil || items[2].OfMessage == nil {
+	if len(items) != 3 || items[0].OfReasoning == nil || items[1].OfOutputMessage == nil || items[2].OfMessage == nil {
 		t.Fatalf("unexpected input order: %+v", items)
 	}
 	encoded, err := json.Marshal(items[0].OfReasoning)
@@ -122,6 +122,30 @@ func TestConvertContents_ReplaysReasoningInOrder(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"encrypted_content":"encrypted"`) {
 		t.Fatalf("reasoning item lost encrypted content: %s", encoded)
+	}
+}
+
+func TestConvertContents_UsesOutputTextForAssistantHistory(t *testing.T) {
+	items, err := convertContents([]*genai.Content{
+		genai.NewContentFromText("previous answer", genai.RoleModel),
+		genai.NewContentFromText("follow-up", genai.RoleUser),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].OfOutputMessage == nil || items[1].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	output := items[0].OfOutputMessage.Content
+	if len(output) != 1 || output[0].OfOutputText == nil || output[0].OfOutputText.Text != "previous answer" {
+		t.Fatalf("unexpected assistant content: %+v", output)
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"role":"assistant","content":[{"type":"input_text"`) {
+		t.Fatalf("assistant history used input_text: %s", encoded)
 	}
 }
 

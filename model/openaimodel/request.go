@@ -112,7 +112,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				return err
 			}
 			if msg != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+				items = append(items, *msg)
 			}
 			messageParts = nil
 			return nil
@@ -200,21 +200,34 @@ func decodeReasoningPart(part *genai.Part) (*responses.ResponseReasoningItemPara
 	return &reasoning, true
 }
 
-func newMessage(role genai.Role, content responses.ResponseInputMessageContentListParam) (*responses.EasyInputMessageParam, error) {
+func newMessage(role genai.Role, content responses.ResponseInputMessageContentListParam) (*responses.ResponseInputItemUnionParam, error) {
 	if len(content) == 0 {
 		return nil, nil
+	}
+	if role == genai.RoleModel {
+		output := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(content))
+		for _, part := range content {
+			if part.OfInputText == nil {
+				return nil, fmt.Errorf("openai: unsupported assistant message content")
+			}
+			output = append(output, responses.ResponseOutputMessageContentUnionParam{
+				OfOutputText: &responses.ResponseOutputTextParam{Text: part.OfInputText.Text},
+			})
+		}
+		msg := responses.ResponseInputItemParamOfOutputMessage(output, "", responses.ResponseOutputMessageStatusCompleted)
+		return &msg, nil
 	}
 	msgRole, err := normalizeRole(role)
 	if err != nil {
 		return nil, err
 	}
-	return &responses.EasyInputMessageParam{
+	return &responses.ResponseInputItemUnionParam{OfMessage: &responses.EasyInputMessageParam{
 		Role: msgRole,
 		Type: responses.EasyInputMessageTypeMessage,
 		Content: responses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: content,
 		},
-	}, nil
+	}}, nil
 }
 
 func convertInlineData(blob *genai.Blob) (responses.ResponseInputContentUnionParam, error) {
