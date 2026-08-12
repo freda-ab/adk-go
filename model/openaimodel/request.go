@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -83,11 +84,22 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	return params, nil
 }
 
+func applyStatelessConfig(params *responses.ResponseNewParams) {
+	params.Store = param.NewOpt(false)
+	for _, include := range params.Include {
+		if include == responses.ResponseIncludableReasoningEncryptedContent {
+			return
+		}
+	}
+	params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
+}
+
 func convertContents(contents []*genai.Content) (responses.ResponseInputParam, error) {
 	var (
 		items     responses.ResponseInputParam
 		tracker   callTracker
 		textParts []string
+		reasoning            = make(map[string]struct{})
 		curRole   genai.Role = genai.RoleUser
 		// flushText is a helper function that takes any accumulated text parts
 		// and converts them into a message, then appends it to our items.
@@ -113,8 +125,26 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 		}
 		curRole = genai.Role(content.Role)
 		for _, part := range content.Parts {
+			if part != nil && curRole == genai.RoleModel {
+				reasoningParam, handled := decodeReasoningPart(part)
+				if handled {
+					if err := flushText(); err != nil {
+						return nil, err
+					}
+					signature := string(part.ThoughtSignature)
+					if _, seen := reasoning[signature]; reasoningParam != nil && !seen {
+						items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: reasoningParam})
+						reasoning[signature] = struct{}{}
+					}
+					if part.Thought {
+						continue
+					}
+				}
+			}
 			switch {
 			case part == nil:
+				continue
+			case part.Thought:
 				continue
 			case part.Text != "":
 				textParts = append(textParts, part.Text)
@@ -149,6 +179,18 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 	}
 
 	return items, nil
+}
+
+func decodeReasoningPart(part *genai.Part) (*responses.ResponseReasoningItemParam, bool) {
+	if part == nil || !bytes.HasPrefix(part.ThoughtSignature, []byte(openAIReasoningSignaturePrefix)) {
+		return nil, false
+	}
+	raw := bytes.TrimPrefix(part.ThoughtSignature, []byte(openAIReasoningSignaturePrefix))
+	var reasoning responses.ResponseReasoningItemParam
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return nil, true
+	}
+	return &reasoning, true
 }
 
 func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessageParam, error) {

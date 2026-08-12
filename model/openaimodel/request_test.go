@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -92,6 +93,64 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 	}
 	if call.CallID != response.CallID {
 		t.Fatalf("call IDs mismatch: %q vs %q", call.CallID, response.CallID)
+	}
+}
+
+func TestConvertContents_ReplaysReasoningInOrder(t *testing.T) {
+	var item responses.ResponseOutputItemUnion
+	if err := json.Unmarshal([]byte(`{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"Checked constraints."}],"encrypted_content":"encrypted"}`), &item); err != nil {
+		t.Fatal(err)
+	}
+	parts, err := convertReasoningItem(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := convertContents([]*genai.Content{
+		{Role: string(genai.RoleModel), Parts: []*genai.Part{parts[0], {Text: "answer"}}},
+		genai.NewContentFromText("next", genai.RoleUser),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[0].OfReasoning == nil || items[1].OfMessage == nil || items[2].OfMessage == nil {
+		t.Fatalf("unexpected input order: %+v", items)
+	}
+	encoded, err := json.Marshal(items[0].OfReasoning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"encrypted_content":"encrypted"`) {
+		t.Fatalf("reasoning item lost encrypted content: %s", encoded)
+	}
+}
+
+func TestConvertContents_DropsInvalidReasoningSignatures(t *testing.T) {
+	items, err := convertContents([]*genai.Content{{
+		Role: string(genai.RoleModel),
+		Parts: []*genai.Part{
+			{Text: "unsigned", Thought: true},
+			{Text: "malformed", Thought: true, ThoughtSignature: []byte(openAIReasoningSignaturePrefix + "{")},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected invalid reasoning to be dropped, got %+v", items)
+	}
+}
+
+func TestApplyStatelessConfig(t *testing.T) {
+	params := &responses.ResponseNewParams{}
+	applyStatelessConfig(params)
+	applyStatelessConfig(params)
+
+	if !params.Store.Valid() || params.Store.Value {
+		t.Fatalf("Store = %+v, want explicit false", params.Store)
+	}
+	if got := params.Include; !reflect.DeepEqual(got, []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}) {
+		t.Fatalf("Include = %v", got)
 	}
 }
 

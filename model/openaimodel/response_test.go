@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 )
@@ -576,8 +577,13 @@ func TestConvertOutputItems(t *testing.T) {
 			if len(parts) != len(tc.want) {
 				t.Fatalf("expected %d parts, got %d", len(tc.want), len(parts))
 			}
-			if diff := cmp.Diff(tc.want, parts); diff != "" {
+			if diff := cmp.Diff(tc.want, parts, cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature")); diff != "" {
 				t.Errorf("convertOutputItems() mismatch (-want +got):\n%s", diff)
+			}
+			for _, part := range parts {
+				if part.Thought && len(part.ThoughtSignature) == 0 {
+					t.Error("reasoning part is missing its replay signature")
+				}
 			}
 		})
 	}

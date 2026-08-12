@@ -36,6 +36,7 @@ type ClientConfig struct {
 	APIKey     string
 	BaseURL    string       // for OpenAI-compatible endpoints
 	HTTPClient *http.Client // optional; e.g. for tests
+	Stateless  bool         // disable response storage and preserve encrypted reasoning for replay
 
 	// Options is an escape hatch for advanced openai-go request options,
 	// appended after the options derived from the fields above.
@@ -43,8 +44,9 @@ type ClientConfig struct {
 }
 
 type openAIModel struct {
-	client *openai.Client
-	name   string
+	client    *openai.Client
+	name      string
+	stateless bool
 }
 
 // NewModel constructs a new openAIModel.
@@ -68,7 +70,7 @@ func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM
 	}
 	opts = append(opts, cfg.Options...)
 	client := openai.NewClient(opts...)
-	return &openAIModel{client: &client, name: modelName}, nil
+	return &openAIModel{client: &client, name: modelName, stateless: cfg.Stateless}, nil
 }
 
 func (m *openAIModel) Name() string { return m.name }
@@ -82,6 +84,9 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	params, err := buildOpenAIParams(m.name, req)
 	if err != nil {
 		return singleErrorSequence(err)
+	}
+	if m.stateless {
+		applyStatelessConfig(&params)
 	}
 	if stream {
 		return m.generateStream(ctx, params)
@@ -152,14 +157,23 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 			return
 		}
 
-		if final := aggregator.Close(); final != nil {
-			if openaiResp != nil {
-				attachMetadata(final, openaiResp)
-				final.UsageMetadata = convertUsage(openaiResp.Usage)
-			}
-			if !yield(final, nil) {
+		final := aggregator.Close()
+		if openaiResp != nil && len(openaiResp.Output) > 0 {
+			genaiResp, err := convertResponse(openaiResp)
+			if err != nil {
+				yield(nil, err)
 				return
 			}
+			final = converters.Genai2LLMResponse(genaiResp)
+		}
+		if openaiResp != nil {
+			attachMetadata(final, openaiResp)
+			if final != nil {
+				final.UsageMetadata = convertUsage(openaiResp.Usage)
+			}
+		}
+		if final != nil && !yield(final, nil) {
+			return
 		}
 	}
 }
