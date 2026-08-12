@@ -97,6 +97,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		Name:       fn.Name,
 		Type:       constant.Function("function"),
 		Parameters: paramsMap,
+		Strict:     param.NewOpt(false),
 	}
 	if fn.Description != "" {
 		fnParam.Description = param.NewOpt(fn.Description)
