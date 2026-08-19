@@ -174,15 +174,20 @@ func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
 				genai.NewContentFromText("Continue", genai.RoleUser),
 			}}
 
-			var gotResponse bool
+			var gotResponse, gotRecoveryMarker bool
 			for response, err := range llm.GenerateContent(t.Context(), req, stream) {
 				if err != nil {
 					t.Fatal(err)
 				}
 				gotResponse = gotResponse || response != nil
+				gotRecoveryMarker = gotRecoveryMarker || response != nil &&
+					!response.Partial && response.CustomMetadata[InvalidThoughtSignatureRecoveryMetadataKey] == true
 			}
 			if !gotResponse {
 				t.Fatal("expected response after retry")
+			}
+			if !gotRecoveryMarker {
+				t.Fatal("recovered response did not contain recovery metadata")
 			}
 			if len(bodies) != 2 {
 				t.Fatalf("requests = %d, want 2", len(bodies))

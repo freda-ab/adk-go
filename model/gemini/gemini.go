@@ -33,6 +33,9 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// InvalidThoughtSignatureRecoveryMetadataKey marks responses recovered without incompatible thought history.
+const InvalidThoughtSignatureRecoveryMetadataKey = "google.adk.gemini.invalidThoughtSignatureRecovery"
+
 // TODO: test coverage
 type geminiModel struct {
 	client             *genai.Client
@@ -128,9 +131,11 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // generate calls the model synchronously returning result from the first candidate.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, req.Config)
+	recovered := false
 	if isInvalidThoughtSignatureError(err) {
 		if contents, ok := withoutThoughts(req.Contents); ok {
 			resp, err = m.client.Models.GenerateContent(ctx, m.modelName(req), contents, req.Config)
+			recovered = err == nil
 		}
 	}
 	if err != nil {
@@ -140,13 +145,18 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		// shouldn't happen?
 		return nil, fmt.Errorf("empty response")
 	}
-	return converters.Genai2LLMResponse(resp), nil
+	result := converters.Genai2LLMResponse(resp)
+	if recovered {
+		markInvalidThoughtSignatureRecovery(result)
+	}
+	return result, nil
 }
 
 // generateStream returns a stream of responses from the model.
 func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		contents := req.Contents
+		recovered := false
 		for {
 			aggregator := llminternal.NewStreamingResponseAggregator()
 			sawResponse := false
@@ -156,6 +166,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 					if !sawResponse && isInvalidThoughtSignatureError(err) {
 						if stripped, ok := withoutThoughts(contents); ok {
 							contents = stripped
+							recovered = true
 							retry = true
 							break
 						}
@@ -174,11 +185,21 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 				continue
 			}
 			if closeResult := aggregator.Close(); closeResult != nil {
+				if recovered {
+					markInvalidThoughtSignatureRecovery(closeResult)
+				}
 				yield(closeResult, nil)
 			}
 			return
 		}
 	}
+}
+
+func markInvalidThoughtSignatureRecovery(response *model.LLMResponse) {
+	if response.CustomMetadata == nil {
+		response.CustomMetadata = make(map[string]any)
+	}
+	response.CustomMetadata[InvalidThoughtSignatureRecoveryMetadataKey] = true
 }
 
 func isInvalidThoughtSignatureError(err error) bool {
