@@ -15,7 +15,9 @@
 package gemini
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"iter"
 	"net/http"
 	"path/filepath"
@@ -33,6 +35,8 @@ import (
 )
 
 //go:generate go test -httprecord=testdata/.*\.httprr
+
+const invalidThoughtSignatureErrorBody = `{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}`
 
 func TestModel_Generate(t *testing.T) {
 	tests := []struct {
@@ -132,6 +136,119 @@ func TestModel_GenerateStream(t *testing.T) {
 				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.FinalText, tt.want, diff)
 			}
 		})
+	}
+}
+
+func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var bodies [][]byte
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bodies = append(bodies, body)
+
+				if len(bodies) == 1 {
+					return httpResponse(http.StatusBadRequest, "application/json", invalidThoughtSignatureErrorBody), nil
+				}
+				response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"recovered"}]},"finishReason":"STOP"}]}`
+				if stream {
+					return httpResponse(http.StatusOK, "text/event-stream", "data: "+response+"\n\n"), nil
+				}
+				return httpResponse(http.StatusOK, "application/json", response), nil
+			})
+
+			llm, err := NewModel(t.Context(), "gemini-test", &genai.ClientConfig{
+				APIKey:     "fakekey",
+				HTTPClient: &http.Client{Transport: transport},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				genai.NewContentFromText("First turn", genai.RoleUser),
+				{Role: genai.RoleModel, Parts: []*genai.Part{
+					{Text: "prior reasoning", Thought: true, ThoughtSignature: []byte("foreign-signature")},
+					{Text: "Prior answer"},
+					{
+						FunctionCall:     &genai.FunctionCall{Name: "kept_tool"},
+						ThoughtSignature: []byte("function-signature"),
+					},
+				}},
+				genai.NewContentFromText("Continue", genai.RoleUser),
+			}}
+
+			gotRecoveryMarker := false
+			for response, err := range llm.GenerateContent(t.Context(), req, stream) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotRecoveryMarker = gotRecoveryMarker || response != nil &&
+					!response.Partial && response.CustomMetadata[InvalidThoughtSignatureRecoveryMetadataKey] == true
+			}
+			if !gotRecoveryMarker {
+				t.Fatal("recovered response did not contain recovery metadata")
+			}
+			if len(bodies) != 2 {
+				t.Fatalf("requests = %d, want 2", len(bodies))
+			}
+			if !bytes.Contains(bodies[0], []byte(`"thought":true`)) {
+				t.Fatal("first request did not contain thought history")
+			}
+			if bytes.Contains(bodies[1], []byte(`"thought":true`)) {
+				t.Fatal("retry still contained thought history")
+			}
+			if !bytes.Contains(bodies[1], []byte(`"functionCall":{"name":"kept_tool"}`)) ||
+				!bytes.Contains(bodies[1], []byte(`"thoughtSignature"`)) {
+				t.Fatal("retry dropped the function-call thought signature")
+			}
+			for _, text := range []string{"First turn", "Prior answer", "Continue"} {
+				if !bytes.Contains(bodies[1], []byte(text)) {
+					t.Fatalf("retry dropped visible history %q", text)
+				}
+			}
+			if !req.Contents[1].Parts[0].Thought {
+				t.Fatal("request history was mutated")
+			}
+		})
+	}
+}
+
+func TestModel_EmptyRecoveryStreamReturnsOriginalError(t *testing.T) {
+	requests := 0
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return httpResponse(http.StatusBadRequest, "application/json", invalidThoughtSignatureErrorBody), nil
+		}
+		return httpResponse(http.StatusOK, "text/event-stream", ""), nil
+	})
+	llm, err := NewModel(t.Context(), "gemini-test", &genai.ClientConfig{
+		APIKey:     "fakekey",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{{
+			Thought:          true,
+			ThoughtSignature: []byte("foreign-signature"),
+		}},
+	}}}
+
+	var gotErr error
+	for _, err := range llm.GenerateContent(t.Context(), req, true) {
+		gotErr = err
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "Invalid thought signature") {
+		t.Fatalf("error = %v, want original invalid-signature error", gotErr)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
 
@@ -329,6 +446,21 @@ func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) 
 type headerInterceptor struct {
 	base  http.RoundTripper
 	check func(*http.Request)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func httpResponse(status int, contentType, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     http.Header{"Content-Type": []string{contentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func (h *headerInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
