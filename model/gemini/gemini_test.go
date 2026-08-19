@@ -170,6 +170,10 @@ func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
 				{Role: genai.RoleModel, Parts: []*genai.Part{
 					{Text: "prior reasoning", Thought: true, ThoughtSignature: []byte("foreign-signature")},
 					{Text: "Prior answer"},
+					{
+						FunctionCall:     &genai.FunctionCall{Name: "kept_tool"},
+						ThoughtSignature: []byte("function-signature"),
+					},
 				}},
 				genai.NewContentFromText("Continue", genai.RoleUser),
 			}}
@@ -195,8 +199,12 @@ func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
 			if !bytes.Contains(bodies[0], []byte(`"thought":true`)) {
 				t.Fatal("first request did not contain thought history")
 			}
-			if bytes.Contains(bodies[1], []byte(`"thought":true`)) || bytes.Contains(bodies[1], []byte(`"thoughtSignature"`)) {
+			if bytes.Contains(bodies[1], []byte(`"thought":true`)) {
 				t.Fatal("retry still contained thought history")
+			}
+			if !bytes.Contains(bodies[1], []byte(`"functionCall":{"name":"kept_tool"}`)) ||
+				!bytes.Contains(bodies[1], []byte(`"thoughtSignature"`)) {
+				t.Fatal("retry dropped the function-call thought signature")
 			}
 			for _, text := range []string{"First turn", "Prior answer", "Continue"} {
 				if !bytes.Contains(bodies[1], []byte(text)) {

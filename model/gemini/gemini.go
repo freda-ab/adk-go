@@ -212,6 +212,8 @@ func isInvalidThoughtSignatureError(err error) bool {
 		apiErr.Status == "INVALID_ARGUMENT" && strings.Contains(apiErr.Message, "Invalid thought signature")
 }
 
+// withoutThoughts drops only hidden thought parts. Signatures on retained parts
+// are required for function-call replay and must remain unchanged.
 func withoutThoughts(contents []*genai.Content) ([]*genai.Content, bool) {
 	result := make([]*genai.Content, 0, len(contents))
 	removed := false
