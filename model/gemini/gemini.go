@@ -17,6 +17,7 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -127,6 +128,11 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // generate calls the model synchronously returning result from the first candidate.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, req.Config)
+	if isInvalidThoughtSignatureError(err) {
+		if contents, ok := withoutThoughts(req.Contents); ok {
+			resp, err = m.client.Models.GenerateContent(ctx, m.modelName(req), contents, req.Config)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
@@ -139,24 +145,72 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 
 // generateStream returns a stream of responses from the model.
 func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
-	aggregator := llminternal.NewStreamingResponseAggregator()
-
 	return func(yield func(*model.LLMResponse, error) bool) {
-		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, req.Config) {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
-				if !yield(llmResponse, err) {
-					return // Consumer stopped
+		contents := req.Contents
+		for {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			sawResponse := false
+			retry := false
+			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, req.Config) {
+				if err != nil {
+					if !sawResponse && isInvalidThoughtSignatureError(err) {
+						if stripped, ok := withoutThoughts(contents); ok {
+							contents = stripped
+							retry = true
+							break
+						}
+					}
+					yield(nil, err)
+					return
+				}
+				sawResponse = true
+				for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
+					if !yield(llmResponse, err) {
+						return
+					}
 				}
 			}
-		}
-		if closeResult := aggregator.Close(); closeResult != nil {
-			yield(closeResult, nil)
+			if retry {
+				continue
+			}
+			if closeResult := aggregator.Close(); closeResult != nil {
+				yield(closeResult, nil)
+			}
+			return
 		}
 	}
+}
+
+func isInvalidThoughtSignatureError(err error) bool {
+	var apiErr genai.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == http.StatusBadRequest &&
+		apiErr.Status == "INVALID_ARGUMENT" && strings.Contains(apiErr.Message, "Invalid thought signature")
+}
+
+func withoutThoughts(contents []*genai.Content) ([]*genai.Content, bool) {
+	result := make([]*genai.Content, 0, len(contents))
+	removed := false
+	for _, content := range contents {
+		if content == nil {
+			result = append(result, nil)
+			continue
+		}
+		parts := make([]*genai.Part, 0, len(content.Parts))
+		for _, part := range content.Parts {
+			if part != nil && part.Thought {
+				removed = true
+				continue
+			}
+			parts = append(parts, part)
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		clone := *content
+		clone.Parts = parts
+		result = append(result, &clone)
+	}
+	return result, removed
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.

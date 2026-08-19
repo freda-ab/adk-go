@@ -15,7 +15,9 @@
 package gemini
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"iter"
 	"net/http"
 	"path/filepath"
@@ -130,6 +132,69 @@ func TestModel_GenerateStream(t *testing.T) {
 			// Since we are expecting GenerateStream to aggregate partial events, the text should be the same
 			if diff := cmp.Diff(tt.want, got.FinalText); diff != "" {
 				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.FinalText, tt.want, diff)
+			}
+		})
+	}
+}
+
+func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var bodies [][]byte
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bodies = append(bodies, body)
+
+				if len(bodies) == 1 {
+					return httpResponse(http.StatusBadRequest, "application/json", `{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}`), nil
+				}
+				response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"recovered"}]},"finishReason":"STOP"}]}`
+				if stream {
+					return httpResponse(http.StatusOK, "text/event-stream", "data: "+response+"\n\n"), nil
+				}
+				return httpResponse(http.StatusOK, "application/json", response), nil
+			})
+
+			llm, err := NewModel(t.Context(), "gemini-test", &genai.ClientConfig{
+				APIKey:     "fakekey",
+				HTTPClient: &http.Client{Transport: transport},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				genai.NewContentFromText("First turn", genai.RoleUser),
+				{Role: genai.RoleModel, Parts: []*genai.Part{
+					{Text: "prior reasoning", Thought: true, ThoughtSignature: []byte("foreign-signature")},
+					{Text: "Prior answer"},
+				}},
+				genai.NewContentFromText("Continue", genai.RoleUser),
+			}}
+
+			var gotResponse bool
+			for response, err := range llm.GenerateContent(t.Context(), req, stream) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotResponse = gotResponse || response != nil
+			}
+			if !gotResponse {
+				t.Fatal("expected response after retry")
+			}
+			if len(bodies) != 2 {
+				t.Fatalf("requests = %d, want 2", len(bodies))
+			}
+			if !bytes.Contains(bodies[0], []byte(`"thought":true`)) {
+				t.Fatal("first request did not contain thought history")
+			}
+			if bytes.Contains(bodies[1], []byte(`"thought":true`)) || bytes.Contains(bodies[1], []byte(`"thoughtSignature"`)) {
+				t.Fatal("retry still contained thought history")
+			}
+			if !req.Contents[1].Parts[0].Thought {
+				t.Fatal("request history was mutated")
 			}
 		})
 	}
@@ -329,6 +394,21 @@ func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) 
 type headerInterceptor struct {
 	base  http.RoundTripper
 	check func(*http.Request)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func httpResponse(status int, contentType, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     http.Header{"Content-Type": []string{contentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func (h *headerInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
