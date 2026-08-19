@@ -157,7 +157,6 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		contents := req.Contents
 		var recoveryErr error
-		recovered := false
 		for {
 			aggregator := llminternal.NewStreamingResponseAggregator()
 			sawResponse := false
@@ -168,7 +167,6 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 						if stripped, ok := withoutThoughts(contents); ok {
 							contents = stripped
 							recoveryErr = err
-							recovered = true
 							retry = true
 							break
 						}
@@ -187,7 +185,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 				continue
 			}
 			if closeResult := aggregator.Close(); closeResult != nil {
-				if recovered {
+				if recoveryErr != nil {
 					markInvalidThoughtSignatureRecovery(closeResult)
 				}
 				yield(closeResult, nil)

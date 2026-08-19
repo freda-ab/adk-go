@@ -36,6 +36,8 @@ import (
 
 //go:generate go test -httprecord=testdata/.*\.httprr
 
+const invalidThoughtSignatureErrorBody = `{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}`
+
 func TestModel_Generate(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -149,7 +151,7 @@ func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
 				bodies = append(bodies, body)
 
 				if len(bodies) == 1 {
-					return httpResponse(http.StatusBadRequest, "application/json", `{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}`), nil
+					return httpResponse(http.StatusBadRequest, "application/json", invalidThoughtSignatureErrorBody), nil
 				}
 				response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"recovered"}]},"finishReason":"STOP"}]}`
 				if stream {
@@ -178,17 +180,13 @@ func TestModel_RetriesInvalidThoughtSignatureWithoutThoughts(t *testing.T) {
 				genai.NewContentFromText("Continue", genai.RoleUser),
 			}}
 
-			var gotResponse, gotRecoveryMarker bool
+			gotRecoveryMarker := false
 			for response, err := range llm.GenerateContent(t.Context(), req, stream) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				gotResponse = gotResponse || response != nil
 				gotRecoveryMarker = gotRecoveryMarker || response != nil &&
 					!response.Partial && response.CustomMetadata[InvalidThoughtSignatureRecoveryMetadataKey] == true
-			}
-			if !gotResponse {
-				t.Fatal("expected response after retry")
 			}
 			if !gotRecoveryMarker {
 				t.Fatal("recovered response did not contain recovery metadata")
@@ -223,7 +221,7 @@ func TestModel_EmptyRecoveryStreamReturnsOriginalError(t *testing.T) {
 	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		requests++
 		if requests == 1 {
-			return httpResponse(http.StatusBadRequest, "application/json", `{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}`), nil
+			return httpResponse(http.StatusBadRequest, "application/json", invalidThoughtSignatureErrorBody), nil
 		}
 		return httpResponse(http.StatusOK, "text/event-stream", ""), nil
 	})
