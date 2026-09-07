@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log"
 	"reflect"
 	"slices"
 	"sort"
@@ -114,6 +115,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
 func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
+	return buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope, events, events, isSingleTurn, userContent)
+}
+
+func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
@@ -209,6 +214,8 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 	}
 	filtered = processedEvents
 
+	filtered = dropOrphanedFunctionResponses(filtered, allEvents)
+
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
 	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered)
@@ -257,6 +264,57 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
+}
+
+func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*session.Event {
+	callIDs := make(map[string]struct{})
+	for _, event := range allEvents {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if call.ID != "" {
+				callIDs[call.ID] = struct{}{}
+			}
+		}
+	}
+
+	isOrphan := func(part *genai.Part) bool {
+		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.ID == "" {
+			return false
+		}
+		_, found := callIDs[part.FunctionResponse.ID]
+		return !found
+	}
+
+	var orphanedIDs []string
+	result := make([]*session.Event, 0, len(events))
+	for _, event := range events {
+		content := utils.Content(event)
+		if content == nil {
+			result = append(result, event)
+			continue
+		}
+
+		if !slices.ContainsFunc(content.Parts, isOrphan) {
+			result = append(result, event)
+			continue
+		}
+
+		cloned := cloneEvent(event)
+		cloned.LLMResponse.Content.Parts = slices.DeleteFunc(cloned.LLMResponse.Content.Parts, func(part *genai.Part) bool {
+			if !isOrphan(part) {
+				return false
+			}
+			orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
+			return true
+		})
+		if len(cloned.LLMResponse.Content.Parts) > 0 {
+			result = append(result, cloned)
+		}
+	}
+
+	if len(orphanedIDs) > 0 {
+		log.Printf("adk: dropping function responses with no matching function call: %v", orphanedIDs)
+	}
+	return result
 }
 
 // rearrangeEventsForLatestFunctionResponse
@@ -339,10 +397,10 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	}
 
 	if functionCallEventIdx == -1 {
-		// Trailing function-response event has no matching call in history;
-		// treat as stale (e.g. retry/reconnect) and drop it instead of failing
-		// the whole turn. Earlier valid history is preserved.
-		return events[:len(events)-1], nil
+		return nil, fmt.Errorf(
+			"no function call event found for function responses ids: %v",
+			responseIDs,
+		)
 	}
 
 	// Collect function response events related to the matching call while
@@ -589,7 +647,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 			continue
 		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, isolationScope, events[i:], isSingleTurn, userContent)
+			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,

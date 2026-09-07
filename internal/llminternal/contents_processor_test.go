@@ -1147,6 +1147,20 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Name:     "orphaned_tool",
 		Response: map[string]any{"error": "no matching call"},
 	}
+	frWithoutID := &genai.FunctionResponse{
+		Name:     "legacy_tool",
+		Response: map[string]any{"result": "ok"},
+	}
+	fcOther := &genai.FunctionCall{
+		ID:   "call_456",
+		Name: "other_tool",
+		Args: map[string]any{"query": "other"},
+	}
+	frOther := &genai.FunctionResponse{
+		ID:       "call_456",
+		Name:     "other_tool",
+		Response: map[string]any{"result": "other"},
+	}
 
 	// --- Test Cases ---
 	testCases := []struct {
@@ -1403,6 +1417,98 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Hello", "user"),
 				genai.NewContentFromText("Hi there", "model"),
 			},
+		},
+		{
+			name: "Orphaned function response is removed from mixed content",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi there", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "What is the weather?"},
+					{FunctionResponse: frOrphaned},
+				}}}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", "user"),
+				genai.NewContentFromText("Hi there", "model"),
+				genai.NewContentFromText("What is the weather?", "user"),
+			},
+		},
+		{
+			name: "Orphaned function response is removed beside matching response",
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{FunctionResponse: frBasic},
+					{FunctionResponse: frOrphaned},
+				}}}},
+			},
+			want: []*genai.Content{
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "Only orphaned function response is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frOrphaned, "user")}},
+			},
+			want: nil,
+		},
+		{
+			name: "Consecutive orphaned function responses are dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Keep this", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frOrphaned, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frOrphaned, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Keep this", "user"),
+			},
+		},
+		{
+			name: "Mid-history orphaned function response is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Before", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frOrphaned, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("After", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Before", "user"),
+				genai.NewContentFromText("After", "user"),
+			},
+		},
+		{
+			name: "Function response without ID is preserved",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frWithoutID, "user")}},
+			},
+			want: []*genai.Content{
+				NewContentFromFunctionResponse(frWithoutID, "user"),
+			},
+		},
+		{
+			name: "Function response with filtered matching call remains an error",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Regular message", "user")}},
+				{Author: agentName, IsolationScope: "task", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			wantErr: "no function call event found",
+		},
+		{
+			name: "Responses for different function call events remain an error",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run both", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcOther, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Working", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{FunctionResponse: frBasic},
+					{FunctionResponse: frOther},
+				}}}},
+			},
+			wantErr: "validation failed: last response event has IDs not in the matching call event",
 		},
 	}
 
