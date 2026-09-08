@@ -299,20 +299,27 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*sessio
 		}
 
 		cloned := cloneEvent(event)
-		cloned.LLMResponse.Content.Parts = slices.DeleteFunc(cloned.LLMResponse.Content.Parts, func(part *genai.Part) bool {
-			if !isOrphan(part) {
-				return false
+		parts := cloned.LLMResponse.Content.Parts[:0]
+		for _, part := range content.Parts {
+			if isOrphan(part) {
+				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
+				cleaned := *part
+				cleaned.FunctionResponse = nil
+				if reflect.ValueOf(cleaned).IsZero() {
+					continue
+				}
+				part = &cleaned
 			}
-			orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
-			return true
-		})
+			parts = append(parts, part)
+		}
+		cloned.LLMResponse.Content.Parts = parts
 		if len(cloned.LLMResponse.Content.Parts) > 0 {
 			result = append(result, cloned)
 		}
 	}
 
 	if len(orphanedIDs) > 0 {
-		log.Printf("adk: dropping function responses with no matching function call: %v", orphanedIDs)
+		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
 	}
 	return result
 }
@@ -822,6 +829,7 @@ func cloneEvent(e *session.Event) *session.Event {
 		IsolationScope: e.IsolationScope,
 		Author:         e.Author,
 		Actions:        e.Actions,
+		LLMResponse:    e.LLMResponse,
 	}
 
 	// 2. Deep copy the LongRunningToolIDs slice
@@ -830,8 +838,7 @@ func cloneEvent(e *session.Event) *session.Event {
 		copy(newEvent.LongRunningToolIDs, e.LongRunningToolIDs)
 	}
 
-	// TODO check if copy parts is needed
-	// 3. Deep copy the LLMResponse pointer struct and content
+	// Own the parts array so pruning and rearrangement cannot mutate session history.
 	if e.LLMResponse.Content != nil {
 		newEvent.LLMResponse.Content = &genai.Content{
 			Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),

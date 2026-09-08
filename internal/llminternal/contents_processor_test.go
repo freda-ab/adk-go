@@ -1164,10 +1164,11 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 
 	// --- Test Cases ---
 	testCases := []struct {
-		name    string
-		events  []*session.Event
-		want    []*genai.Content
-		wantErr string // Use string to check for specific error messages
+		name            string
+		events          []*session.Event
+		want            []*genai.Content
+		wantErr         string // Use string to check for specific error messages
+		includeContents llmagent.IncludeContents
 	}{
 		{
 			name:   "NilEvent",
@@ -1435,6 +1436,36 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
+			name: "Orphaned function response sharing a part preserves text",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "What is the weather?", FunctionResponse: frOrphaned},
+				}}}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", "user"),
+				genai.NewContentFromText("Hi", "model"),
+				genai.NewContentFromText("What is the weather?", "user"),
+			},
+		},
+		{
+			name: "Mid-history mixed content preserves user text",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Before", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "My question"}, {FunctionResponse: frOrphaned},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("After", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Before", "user"),
+				genai.NewContentFromText("My question", "user"),
+				genai.NewContentFromText("After", "user"),
+			},
+		},
+		{
 			name: "Orphaned function response is removed beside matching response",
 			events: []*session.Event{
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
@@ -1497,6 +1528,16 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			wantErr: "no function call event found",
 		},
 		{
+			name:            "Current turn retains validation for a call from an earlier turn",
+			includeContents: llmagent.IncludeContentsNone,
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Next question", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			wantErr: "no function call event found",
+		},
+		{
 			name: "Responses for different function call events remain an error",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run both", "user")}},
@@ -1514,9 +1555,23 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			before, err := json.Marshal(tc.events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				after, err := json.Marshal(tc.events)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) {
+					t.Errorf("ContentsRequestProcessor mutated session events (-before +after):\n%s", cmp.Diff(string(before), string(after)))
+				}
+			})
 			testAgent := utils.Must(llmagent.New(llmagent.Config{
-				Name:  agentName,
-				Model: testModel,
+				Name:            agentName,
+				Model:           testModel,
+				IncludeContents: tc.includeContents,
 			}))
 
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
